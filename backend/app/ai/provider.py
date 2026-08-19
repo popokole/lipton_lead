@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -100,11 +101,38 @@ class GeneratedReply(BaseModel):
         # из готового ответа: запятая на месте « — », иначе просто выкидываем.
         cleaned = value.replace(" — ", ", ").replace(" – ", ", ")
         cleaned = cleaned.replace("—", ",").replace("–", ",").replace("―", ",")
-        return cleaned.replace(" ,", ",").replace(",,", ",")
+        cleaned = cleaned.replace(" ,", ",").replace(",,", ",")
+        return _dedupe_mentions(cleaned)
     # Модель сообщает, что не может ответить по имеющимся данным. Это честнее,
     # чем выдумать ответ, и приводит к передаче диалога человеку.
     refused: bool = False
     refusal_reason: str = ""
+
+
+_MENTION = re.compile(r"@[A-Za-z0-9_]{3,32}")
+
+
+def _dedupe_mentions(text: str) -> str:
+    """Оставляет каждый @-ник в тексте не более одного раза.
+
+    Модель иногда повторяет тег специалиста (в начале и в конце). Первое
+    вхождение сохраняем на месте, повторы того же ника вырезаем вместе с
+    прилипшими пробелами.
+    """
+    seen: set[str] = set()
+
+    def repl(match: re.Match[str]) -> str:
+        handle = match.group(0).lower()
+        if handle in seen:
+            return ""
+        seen.add(handle)
+        return match.group(0)
+
+    cleaned = _MENTION.sub(repl, text)
+    # Схлопываем задвоённые пробелы и висящие пробелы перед знаками.
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([,.!?])", r"\1", cleaned)
+    return cleaned.strip()
 
 
 class Summary(BaseModel):
