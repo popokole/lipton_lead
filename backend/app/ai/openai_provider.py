@@ -236,13 +236,25 @@ class OpenAIProvider:
         return AIResponse(result=parse_structured(content, schema), usage=usage)
 
 
+_TYPE_HINTS = {str: "строка", bool: "true/false", int: "целое", float: "число"}
+
+
 def _json_instruction(schema: type[BaseModel]) -> str:
-    """Инструкция для агрегаторов без response_format: перечень полей JSON."""
-    fields = ", ".join(schema.model_fields)
+    """Инструкция для агрегаторов без response_format: поля JSON с типами.
+
+    Типы важны: без них модель кладёт прозу в булевы поля вроде used_knowledge,
+    и строгая валидация ломается.
+    """
+    parts = []
+    for name, field in schema.model_fields.items():
+        hint = _TYPE_HINTS.get(field.annotation, "строка")  # type: ignore[arg-type]
+        parts.append(f"{name} ({hint})")
+    fields = ", ".join(parts)
     return (
         "Верни ТОЛЬКО один JSON-объект без пояснений и без ``` "
-        f"с полями: {fields}. "
-        "Переносы строк внутри значений экранируй как \n."
+        f"строго с этими полями и типами: {fields}. "
+        "Не добавляй других полей. Соблюдай типы: булевы поля — true/false, "
+        "не текст. Переносы строк внутри значений экранируй как \\n."
     )
 
 
@@ -303,7 +315,11 @@ def _salvage_fields[T: BaseModel](raw: str, schema: type[T]) -> dict[str, str]:
     после чего пробуем аккуратно распаковать escape-последовательности.
     """
     out: dict[str, str] = {}
-    for name in schema.model_fields:
+    for name, field in schema.model_fields.items():
+        # Только строковые поля: булев used_knowledge модель может заполнить
+        # прозой, и попытка втащить его сюда сорвала бы восстановление text.
+        if field.annotation is not str:
+            continue
         pattern = _STRING_FIELD.format(name=re.escape(name))
         match = re.search(pattern, raw, re.S)
         if not match:
