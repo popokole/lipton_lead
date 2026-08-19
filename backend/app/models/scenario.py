@@ -38,6 +38,11 @@ class Scenario(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     fallback_text: Mapped[str | None] = mapped_column(sa.Text)
 
     human_handoff_enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=True)
+
+    # Ответ в группе + личка: короткая фраза уходит в чат, полноценный
+    # ИИ-ответ — в личку автору. Для лички правило работает как обычно.
+    reply_in_dm: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
+    group_ack_text: Mapped[str | None] = mapped_column(sa.Text)
     min_confidence: Mapped[float | None] = mapped_column(sa.Numeric(3, 2))
 
     enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=True)

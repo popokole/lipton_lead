@@ -93,6 +93,8 @@ export interface Scenario {
   max_reply_length: number | null;
   context_messages: number | null;
   require_knowledge_grounding: boolean;
+  reply_in_dm?: boolean;
+  group_ack_text?: string | null;
   fallback_text: string | null;
   enabled: boolean;
 }

@@ -36,7 +36,7 @@ from app.pipeline.reply_pipeline import ReplyOutcome, ReplyPipeline
 from app.rules.engine import RuleEngine, RuleMatch
 from app.rules.filters import SelfGuard
 from app.telegram.messages import MessageNormalizer, NormalizedMessage
-from app.telegram.peers import PeerCache, extract_input_peer
+from app.telegram.peers import PeerCache, extract_input_peer, extract_input_sender
 
 logger = get_logger(__name__)
 
@@ -94,6 +94,10 @@ class MonitorPipeline:
 
         # Пропуск в этот чат берём из самого события: другого источника нет.
         self.peers.remember(account_id, message.tg_chat_id, await extract_input_peer(event))
+        if message.sender_tg_id is not None:
+            self.peers.remember_sender(
+                account_id, message.sender_tg_id, await extract_input_sender(event)
+            )
 
         outcome = await self._process(message)
         elapsed_ms = int((get_clock().monotonic() - started) * 1000)

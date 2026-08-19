@@ -33,6 +33,7 @@ class PeerCache:
     def __init__(self, capacity: int = DEFAULT_CAPACITY) -> None:
         self._capacity = capacity
         self._items: OrderedDict[tuple[uuid.UUID, int], Any] = OrderedDict()
+        self._senders: OrderedDict[tuple[uuid.UUID, str, int], Any] = OrderedDict()
 
     def remember(self, account_id: uuid.UUID, tg_chat_id: int, peer: Any) -> None:
         if peer is None:
@@ -50,12 +51,44 @@ class PeerCache:
             self._items.move_to_end(key)
         return peer
 
+    def remember_sender(self, account_id: uuid.UUID, tg_user_id: int, peer: Any) -> None:
+        """Кеш peer отправителя — нужен, чтобы написать ему в личку из группы."""
+        if peer is None:
+            return
+        key = (account_id, "u", tg_user_id)
+        self._senders[key] = peer
+        self._senders.move_to_end(key)
+        while len(self._senders) > self._capacity:
+            self._senders.popitem(last=False)
+
+    def get_sender(self, account_id: uuid.UUID, tg_user_id: int) -> Any | None:
+        key = (account_id, "u", tg_user_id)
+        peer = self._senders.get(key)
+        if peer is not None:
+            self._senders.move_to_end(key)
+        return peer
+
     def forget_account(self, account_id: uuid.UUID) -> None:
         for key in [key for key in self._items if key[0] == account_id]:
             del self._items[key]
 
     def __len__(self) -> int:
         return len(self._items)
+
+
+async def extract_input_sender(event: Any) -> Any | None:
+    """Достаёт peer автора сообщения — для ответа ему в личку."""
+    peer = getattr(event, "input_sender", None)
+    if peer is not None:
+        return peer
+    getter = getattr(event, "get_input_sender", None)
+    if getter is None:
+        return None
+    try:
+        return await getter()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("input_sender_unavailable", detail=str(exc))
+        return None
 
 
 async def extract_input_peer(event: Any) -> Any | None:

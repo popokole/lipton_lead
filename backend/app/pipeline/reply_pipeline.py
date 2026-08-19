@@ -344,6 +344,14 @@ class ReplyPipeline:
             lead_score = 40
             intent = None
 
+        action_payload: dict[str, object] = {"lead_score": lead_score, "intent": intent}
+        reply_text = text
+        # Групповой лид при включённом reply_in_dm: в чат — короткая фраза, а
+        # развёрнутый ответ ИИ уходит автору в личку.
+        if scenario.reply_in_dm and not message.is_private and message.sender_tg_id is not None:
+            reply_text = scenario.group_ack_text or "Отправлю в лс 🙂"
+            action_payload["dm_text"] = text
+
         result = await self._actions.dispatch(
             ActionRequest(
                 type=ActionType.REPLY,
@@ -355,9 +363,9 @@ class ReplyPipeline:
                 conversation_id=context.conversation_id,
                 rule_id=match.rule.id,
                 scenario_id=scenario.id,
-                reply_text=text,
+                reply_text=reply_text,
                 validation=verdict.to_payload(),
-                payload={"lead_score": lead_score, "intent": intent},
+                payload=action_payload,
             )
         )
 

@@ -59,22 +59,49 @@ class ReplyHandler:
                 status=ActionStatus.FAILED, detail="аккаунт не подключён на этом воркере"
             )
 
+        # Режим «в чат + в личку»: в группу уходит короткая фраза, а полноценный
+        # ответ ИИ — в личку автору. dm_text и признак приходят в payload.
+        dm_text = request.payload.get("dm_text")
+        group_text = request.reply_text
+
         try:
             sent = await self.sender.send(
                 request.account_id,
                 client,
                 chat_id=request.message.tg_chat_id,
-                text=request.reply_text,
+                text=group_text,
                 reply_to=request.message.tg_message_id,
                 peer=self.peers.get(request.account_id, request.message.tg_chat_id),
             )
         except TelegramFloodWaitError as exc:
-            # Ждать столько внутри задачи бессмысленно: показываем оператору.
             return ActionResult(
                 status=ActionStatus.FAILED, detail=f"Telegram просит подождать {exc.seconds}с"
             )
         except TelegramError as exc:
             return ActionResult(status=ActionStatus.FAILED, detail=exc.message)
+
+        # Личка — «мягкое» действие: её сбой не отменяет ответ в группе,
+        # который уже ушёл. Пишем предупреждение и продолжаем.
+        if dm_text and request.message.sender_tg_id is not None:
+            sender_peer = self.peers.get_sender(
+                request.account_id, request.message.sender_tg_id
+            )
+            try:
+                await self.sender.send(
+                    request.account_id,
+                    client,
+                    chat_id=request.message.sender_tg_id,
+                    text=str(dm_text),
+                    peer=sender_peer,
+                )
+            except (TelegramFloodWaitError, TelegramError) as exc:
+                detail = getattr(exc, "message", str(exc))
+                logger.warning(
+                    "dm_reply_failed",
+                    account_id=str(request.account_id),
+                    peer=request.message.sender_tg_id,
+                    detail=detail,
+                )
 
         await self._record_reply(request, sent.tg_message_id)
         await self.publisher.publish(

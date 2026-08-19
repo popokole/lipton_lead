@@ -30,6 +30,8 @@ export default function ScenariosPage() {
   const [fallback, setFallback] = useState('');
   const [grounding, setGrounding] = useState(false);
   const [handoff, setHandoff] = useState(false);
+  const [replyInDm, setReplyInDm] = useState(false);
+  const [groupAck, setGroupAck] = useState('Отправлю в лс 🙂');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -44,6 +46,8 @@ export default function ScenariosPage() {
         fallback_text: fallback.trim() || null,
         require_knowledge_grounding: grounding,
         human_handoff_enabled: handoff,
+        reply_in_dm: replyInDm,
+        group_ack_text: groupAck.trim() || null,
         context_messages: 15,
       });
       setName('');
@@ -118,6 +122,24 @@ export default function ScenariosPage() {
             />
             Передавать оператору на чувствительных темах
           </label>
+          <label className="flex items-end gap-2 pb-2 text-sm text-slate-400">
+            <input
+              type="checkbox"
+              checked={replyInDm}
+              onChange={(e) => setReplyInDm(e.target.checked)}
+              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
+            />
+            В группе — короткий ответ, полный ИИ-ответ в личку
+          </label>
+          {replyInDm && (
+            <Field label="Фраза в группу" hint="Что видят в чате; полный ответ уйдёт в личку">
+              <input
+                className={inputClass}
+                value={groupAck}
+                onChange={(e) => setGroupAck(e.target.value)}
+              />
+            </Field>
+          )}
         </div>
         <div className="mt-4">
           <Button onClick={create} disabled={busy || !name.trim() || !prompt.trim()}>
