@@ -125,6 +125,8 @@ export const api = {
     send<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) }),
   patch: <T,>(path: string, body: unknown) =>
     send<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
+  put: <T,>(path: string, body: unknown) =>
+    send<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
   delete: <T,>(path: string) => send<T>(path, { method: 'DELETE' }),
   upload: <T,>(path: string, form: FormData) => sendForm<T>(path, form),
 };
