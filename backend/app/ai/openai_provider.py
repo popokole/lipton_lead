@@ -189,10 +189,15 @@ class OpenAIProvider:
             payload["temperature"] = temperature
 
         if self._responses is not None:
-            # Строгую JSON-схему агрегатор может не поддерживать, поэтому формат
-            # держится на промпте, а разбирает ответ терпимый парсер ниже.
+            # Агрегатор не понимает response_format, поэтому формат держим
+            # промптом: явно перечисляем поля JSON. Без этого модель отвечает
+            # прозой, и text/group_text не разделяются.
+            hinted = [
+                *messages,
+                ChatMessage(role="system", content=_json_instruction(schema)),
+            ]
             result = await self._responses.complete(
-                messages=[message.model_dump() for message in messages],
+                messages=[message.model_dump() for message in hinted],
                 model=chosen_model,
                 max_output_tokens=max_tokens or self._settings.default_ai_max_tokens,
                 temperature=temperature,
@@ -229,6 +234,16 @@ class OpenAIProvider:
             raise AIResponseFormatError("AI returned an empty response")
 
         return AIResponse(result=parse_structured(content, schema), usage=usage)
+
+
+def _json_instruction(schema: type[BaseModel]) -> str:
+    """Инструкция для агрегаторов без response_format: перечень полей JSON."""
+    fields = ", ".join(schema.model_fields)
+    return (
+        "Верни ТОЛЬКО один JSON-объект без пояснений и без ``` "
+        f"с полями: {fields}. "
+        "Переносы строк внутри значений экранируй как \n."
+    )
 
 
 def parse_structured[T: BaseModel](content: str, schema: type[T]) -> T:
