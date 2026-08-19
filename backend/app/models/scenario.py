@@ -1,0 +1,58 @@
+"""Сценарии — конфигурация поведения AI (ТЗ §13)."""
+
+from __future__ import annotations
+
+import uuid
+
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.database.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+
+
+class Scenario(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "scenarios"
+
+    name: Mapped[str] = mapped_column(sa.String(120), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(sa.Text)
+    system_prompt: Mapped[str] = mapped_column(sa.Text, nullable=False)
+
+    model: Mapped[str | None] = mapped_column(sa.String(120))
+    temperature: Mapped[float | None] = mapped_column(sa.Numeric(3, 2))
+    max_tokens: Mapped[int | None] = mapped_column(sa.Integer)
+
+    language: Mapped[str | None] = mapped_column(sa.String(8))
+    tone: Mapped[str | None] = mapped_column(sa.String(64))
+    max_reply_length: Mapped[int | None] = mapped_column(sa.Integer)
+    context_messages: Mapped[int | None] = mapped_column(sa.Integer)
+
+    knowledge_base_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), sa.ForeignKey("knowledge_bases.id", ondelete="SET NULL")
+    )
+    # Если ответ не подтверждён базой знаний, генерации не будет: выдаём
+    # fallback_text или передаём человеку (ТЗ §17 — «AI не должен выдумывать»).
+    require_knowledge_grounding: Mapped[bool] = mapped_column(
+        sa.Boolean, nullable=False, default=False
+    )
+    fallback_text: Mapped[str | None] = mapped_column(sa.Text)
+
+    human_handoff_enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=True)
+    min_confidence: Mapped[float | None] = mapped_column(sa.Numeric(3, 2))
+
+    enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=True)
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "temperature IS NULL OR (temperature >= 0 AND temperature <= 2)",
+            name="temperature_range",
+        ),
+        sa.CheckConstraint(
+            "min_confidence IS NULL OR (min_confidence >= 0 AND min_confidence <= 1)",
+            name="min_confidence_range",
+        ),
+        sa.CheckConstraint(
+            "context_messages IS NULL OR context_messages > 0", name="context_messages_positive"
+        ),
+        sa.Index("ix_scenarios_enabled", "enabled"),
+    )

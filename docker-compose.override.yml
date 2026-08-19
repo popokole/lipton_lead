@@ -1,0 +1,67 @@
+# Локальная разработка: hot-reload, порты зависимостей наружу, dev-зависимости.
+# Файл подхватывается автоматически при `docker compose up`; на сервере
+# запускать с `-f docker-compose.yml`, чтобы он не применялся.
+
+services:
+  postgres:
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+
+  redis:
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+
+  api:
+    build:
+      target: dev
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/app
+    environment:
+      ENV: dev
+      DEBUG: "true"
+      LOG_FORMAT: console
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/alembic:/app/alembic
+      - ./backend/tests:/app/tests
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+  worker:
+    build:
+      target: dev
+    environment:
+      ENV: dev
+      LOG_FORMAT: console
+    volumes:
+      - ./backend/app:/app/app
+
+  migrate:
+    build:
+      target: dev
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/alembic:/app/alembic
+
+  frontend:
+    build:
+      target: dev
+    environment:
+      NODE_ENV: development
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/tailwind.config.ts:/app/tailwind.config.ts
+      - ./frontend/next.config.mjs:/app/next.config.mjs
+    ports:
+      # 3000 на хосте часто занят другим проектом; панель всё равно
+      # открывается через nginx, прямой порт нужен лишь для отладки.
+      - "${FRONTEND_PORT:-3001}:3000"

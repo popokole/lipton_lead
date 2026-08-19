@@ -1,0 +1,126 @@
+name: tg-ai-platform
+
+x-backend-env: &backend-env
+  # host.docker.internal намеренно НЕ переопределяем через extra_hosts:
+  # Docker Desktop заводит это имя сам и указывает на IPv4-шлюз, а ручное
+  # отображение на host-gateway даёт IPv6 и ломает подключение к локальному
+  # прокси, который слушает только IPv4. На Linux-сервере прокси обычно
+  # внешний, а не на хосте, — там имя и не нужно.
+  env_file:
+    # required:false — на сервере переменные могут приходить из секрет-менеджера,
+    # и отсутствие файла не должно ронять весь стек.
+    - path: .env
+      required: false
+  environment:
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-tgai}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-tgai}
+    REDIS_URL: redis://redis:6379/0
+
+services:
+  postgres:
+    # Образ с расширением pgvector: в обычном postgres:16 его нет.
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tgai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-tgai}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tgai} -d ${POSTGRES_DB:-tgai}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory ${REDIS_MAXMEMORY:-512mb}
+      --maxmemory-policy noeviction
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Одноразовый прогон миграций. api и worker стартуют только после его успеха —
+  # иначе несколько реплик пытались бы применить Alembic одновременно.
+  migrate:
+    build:
+      context: ./backend
+      target: runtime
+    <<: *backend-env
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ./backend
+      target: runtime
+    <<: *backend-env
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    expose:
+      - "8000"
+
+  worker:
+    build:
+      context: ./backend
+      target: runtime
+    <<: *backend-env
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker_main"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      target: runtime
+    restart: unless-stopped
+    expose:
+      - "3000"
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+      - frontend
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    healthcheck:
+      # 127.0.0.1, а не localhost: внутри контейнера localhost сначала
+      # разрешается в ::1, а nginx слушает только IPv4.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  postgres-data:
+  redis-data:
