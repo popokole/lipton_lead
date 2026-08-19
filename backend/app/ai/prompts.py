@@ -77,6 +77,16 @@ def build_generate_messages(request: GenerateRequest) -> list[ChatMessage]:
         )
     if request.max_reply_length:
         system_parts.append(f"Ответ не длиннее {request.max_reply_length} символов.")
+    if request.reply_in_dm:
+        system_parts.append(
+            "Режим «в чат + в личку». Верни два текста:
+"
+            "- text — полноценный ответ В ЛИЧКУ: по-человечески, с рекомендацией "
+            "и, если уместно, тегом/ссылкой;
+"
+            "- group_text — КОРОТКАЯ живая фраза в группу (тип «напишу в лс 🙂»), "
+            "разная каждый раз, без конкретики и ссылок."
+        )
 
     messages = [ChatMessage(role="system", content="\n\n".join(system_parts))]
 

@@ -281,6 +281,7 @@ class ReplyPipeline:
             context,
             scenario,
             text=generation.reply.text,
+            group_text=generation.reply.group_text,
             used_knowledge=generation.reply.used_knowledge,
             cooldown_keys=cooldown_keys,
             analysis=analysis,
@@ -297,6 +298,7 @@ class ReplyPipeline:
         scenario: Scenario,
         *,
         text: str,
+        group_text: str = "",
         used_knowledge: bool,
         cooldown_keys: CooldownKeys,
         analysis: AnalysisOutcome | None,
@@ -346,10 +348,11 @@ class ReplyPipeline:
 
         action_payload: dict[str, object] = {"lead_score": lead_score, "intent": intent}
         reply_text = text
-        # Групповой лид при включённом reply_in_dm: в чат — короткая фраза, а
-        # развёрнутый ответ ИИ уходит автору в личку.
+        # Групповой лид при включённом reply_in_dm: в чат — короткая фраза
+        # (её ИИ сгенерил в group_text; запасная — из сценария), а развёрнутый
+        # ответ ИИ уходит автору в личку.
         if scenario.reply_in_dm and not message.is_private and message.sender_tg_id is not None:
-            reply_text = scenario.group_ack_text or "Отправлю в лс 🙂"
+            reply_text = group_text or scenario.group_ack_text or "Отправлю в лс 🙂"
             action_payload["dm_text"] = text
 
         result = await self._actions.dispatch(
@@ -500,6 +503,7 @@ def _scenario_settings(scenario: Scenario) -> ScenarioSettings:
         max_reply_length=scenario.max_reply_length,
         language=scenario.language,
         require_grounding=scenario.require_knowledge_grounding,
+        reply_in_dm=scenario.reply_in_dm,
     )
 
 

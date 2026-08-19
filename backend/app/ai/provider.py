@@ -60,6 +60,9 @@ class GeneratedReply(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     text: str
+    # Короткая фраза в группу при режиме «в чат + в личку»: живая, разная
+    # каждый раз. Пусто — используется запасная фраза сценария.
+    group_text: str = ""
     used_knowledge: bool = False
     # Модель сообщает, что не может ответить по имеющимся данным. Это честнее,
     # чем выдумать ответ, и приводит к передаче диалога человеку.
@@ -99,6 +102,7 @@ class GenerateRequest(BaseModel):
     memory: dict[str, str] = Field(default_factory=dict)
     conversation_summary: str | None = None
     require_grounding: bool = False
+    reply_in_dm: bool = False
     max_reply_length: int | None = None
     model: str | None = None
     temperature: float | None = None

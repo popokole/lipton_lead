@@ -59,6 +59,7 @@ class ScenarioSettings:
     max_reply_length: int | None = None
     language: str | None = None
     require_grounding: bool = False
+    reply_in_dm: bool = False
 
 
 class AIGenerator:
@@ -107,6 +108,7 @@ class AIGenerator:
             memory=memory or {},
             conversation_summary=conversation_summary,
             require_grounding=scenario.require_grounding,
+            reply_in_dm=scenario.reply_in_dm,
             max_reply_length=scenario.max_reply_length,
             model=scenario.model,
             temperature=scenario.temperature,
