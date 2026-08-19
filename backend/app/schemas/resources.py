@@ -283,6 +283,7 @@ class MessageOut(ORMModel):
     is_incoming: bool
     is_bot_reply: bool
     processed_status: ProcessedStatus
+    status_reason: str | None = None
     rule_id: uuid.UUID | None
 
 
@@ -297,6 +298,26 @@ class ActionOut(ORMModel):
     validation: dict[str, Any] | None
     error: str | None
     sent_at: datetime | None
+    created_at: datetime
+
+
+class EscalationOut(BaseModel):
+    """Диалог, переданный оператору (ТЗ §21) — для экрана «Требует внимания»."""
+
+    conversation_id: uuid.UUID
+    account_id: uuid.UUID
+    account_label: str | None
+    peer_tg_id: int
+    chat_id: uuid.UUID | None
+    chat_title: str | None
+    chat_username: str | None
+    chat_has_avatar: bool = False
+    status: ConversationStatus
+    reason: str | None
+    suggested_reply: str | None
+    notification_id: uuid.UUID | None
+    summary: str | None
+    last_message_at: datetime | None
     created_at: datetime
 
 
@@ -382,3 +403,11 @@ class DashboardSeries(BaseModel):
     replies: list[DailyPoint]
     leads: list[DailyPoint]
     errors: list[DailyPoint]
+
+
+class RuleStatOut(BaseModel):
+    rule_id: uuid.UUID
+    rule_name: str
+    enabled: bool
+    matches: int
+    replies: int

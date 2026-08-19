@@ -7,13 +7,35 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 from sqlalchemy import Select, func, select
+from sqlalchemy import update as sa_update
 
-from app.api.deps import CurrentUser, DbDep
-from app.models import Action, ActionStatus, Chat, Conversation, EventLog, EventType, Lead, Message
-from app.schemas.common import Page
+from app.api.deps import CurrentUser, DbDep, OperatorUser, RedisDep
+from app.bus.events import EventPublisher
+from app.bus.messages import Event
+from app.bus.messages import EventType as BusEventType
+from app.core.clock import utcnow
+from app.core.errors import NotFoundError
+from app.database.repositories.conversations import ConversationRepository
+from app.database.repositories.events import EventLogRepository
+from app.models import (
+    Account,
+    Action,
+    ActionStatus,
+    Chat,
+    Conversation,
+    ConversationStatus,
+    EventLog,
+    EventType,
+    Lead,
+    Message,
+    Notification,
+    NotificationType,
+)
+from app.schemas.common import Ok, Page
 from app.schemas.resources import (
     ActionOut,
     ConversationOut,
+    EscalationOut,
     EventLogOut,
     LeadOut,
     MessageOut,
@@ -24,6 +46,7 @@ actions_router = APIRouter(prefix="/actions", tags=["actions"])
 logs_router = APIRouter(prefix="/logs", tags=["logs"])
 conversations_router = APIRouter(prefix="/conversations", tags=["conversations"])
 leads_router = APIRouter(prefix="/leads", tags=["leads"])
+handoff_router = APIRouter(prefix="/handoff", tags=["handoff"])
 
 
 async def _count(db: DbDep, stmt: Select[Any]) -> int:
@@ -195,3 +218,121 @@ async def list_leads(
         stmt = stmt.where(Lead.account_id == account_id)
     rows = await db.scalars(stmt.limit(limit))
     return [LeadOut.model_validate(row) for row in rows.all()]
+
+
+@handoff_router.get("", response_model=list[EscalationOut], summary="Требует внимания")
+async def list_escalations(
+    _user: CurrentUser,
+    db: DbDep,
+    account_id: uuid.UUID | None = Query(default=None),
+) -> list[EscalationOut]:
+    """Открытые эскалации на оператора (ТЗ §21).
+
+    Источник истины — Conversation.status: он и переводит диалог обратно в
+    ACTIVE при следующем входящем сообщении, и решении оператора. Причину и
+    подготовленный ответ несёт Notification — но это только контекст, не
+    основа списка, поэтому джойн делаем в Python, а не в JSONB-SQL.
+    """
+    stmt = (
+        select(
+            Conversation,
+            Chat.title.label("chat_title"),
+            Chat.username.label("chat_username"),
+            (Chat.avatar.is_not(None)).label("chat_has_avatar"),
+            Account.label.label("account_label"),
+        )
+        .select_from(Conversation)
+        .outerjoin(Chat, Chat.id == Conversation.chat_id)
+        .join(Account, Account.id == Conversation.account_id)
+        .where(Conversation.status == ConversationStatus.HUMAN_REQUIRED)
+        .order_by(Conversation.last_message_at.desc().nullslast())
+    )
+    if account_id is not None:
+        stmt = stmt.where(Conversation.account_id == account_id)
+    rows = (await db.execute(stmt)).all()
+    if not rows:
+        return []
+
+    conversation_ids = {str(row.Conversation.id) for row in rows}
+    notif_rows = await db.scalars(
+        select(Notification)
+        .where(Notification.type == NotificationType.HUMAN_HANDOFF)
+        .order_by(Notification.created_at.desc())
+        .limit(500)
+    )
+    latest_notification: dict[str, Notification] = {}
+    for notification in notif_rows.all():
+        conv_id = (notification.payload or {}).get("conversation_id")
+        if conv_id in conversation_ids and conv_id not in latest_notification:
+            latest_notification[conv_id] = notification
+
+    items: list[EscalationOut] = []
+    for row in rows:
+        conversation = row.Conversation
+        matched = latest_notification.get(str(conversation.id))
+        payload = matched.payload if matched and matched.payload else {}
+        items.append(
+            EscalationOut(
+                conversation_id=conversation.id,
+                account_id=conversation.account_id,
+                account_label=row.account_label,
+                peer_tg_id=conversation.peer_tg_id,
+                chat_id=conversation.chat_id,
+                chat_title=row.chat_title,
+                chat_username=row.chat_username,
+                chat_has_avatar=bool(row.chat_has_avatar),
+                status=conversation.status,
+                reason=matched.body if matched else None,
+                suggested_reply=payload.get("suggested_reply"),
+                notification_id=matched.id if matched else None,
+                summary=conversation.summary,
+                last_message_at=conversation.last_message_at,
+                created_at=matched.created_at if matched else conversation.updated_at,
+            )
+        )
+    return items
+
+
+@handoff_router.post("/{conversation_id}/resolve", response_model=Ok, summary="Отметить решённым")
+async def resolve_escalation(
+    conversation_id: uuid.UUID,
+    _user: OperatorUser,
+    db: DbDep,
+    redis: RedisDep,
+) -> Ok:
+    """Оператор ответил собеседнику сам (в Telegram) — диалог больше не ждёт.
+
+    Реальный ответ уходит из самого Telegram силами оператора: панель здесь
+    только снимает флаг ожидания, не отправляет ничего сама (ТЗ §21).
+    """
+    conversation = await db.get(Conversation, conversation_id)
+    if conversation is None:
+        raise NotFoundError("Диалог не найден")
+
+    await ConversationRepository(db).set_status(conversation_id, ConversationStatus.ACTIVE)
+    await db.execute(
+        sa_update(Notification)
+        .where(
+            Notification.type == NotificationType.HUMAN_HANDOFF,
+            Notification.read_at.is_(None),
+            Notification.payload["conversation_id"].astext == str(conversation_id),
+        )
+        .values(read_at=utcnow())
+    )
+    await EventLogRepository(db).add(
+        EventType.HUMAN_HANDOFF,
+        level="INFO",
+        account_id=conversation.account_id,
+        chat_id=conversation.chat_id,
+        status="human_handoff_resolved",
+    )
+    await db.commit()
+
+    await EventPublisher(redis).publish(
+        Event(
+            type=BusEventType.HUMAN_HANDOFF,
+            account_id=conversation.account_id,
+            payload={"conversation_id": str(conversation_id), "resolved": True},
+        )
+    )
+    return Ok(detail="Диалог возвращён в работу")

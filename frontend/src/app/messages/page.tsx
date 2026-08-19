@@ -100,8 +100,13 @@ export default function MessagesPage() {
                   )}
                 </td>
                 <td className="max-w-xl py-2 pr-4 text-slate-300">{message.text ?? '—'}</td>
-                <td className="py-2">
+                <td className="max-w-[220px] py-2">
                   <Badge tone={statusTone(message.processed_status)}>{message.processed_status}</Badge>
+                  {message.status_reason && (
+                    <p className="mt-1 truncate text-xs text-slate-500" title={message.status_reason}>
+                      {message.status_reason}
+                    </p>
+                  )}
                 </td>
               </tr>
             ))}

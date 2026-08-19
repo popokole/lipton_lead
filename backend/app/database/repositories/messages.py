@@ -98,6 +98,7 @@ class MessageRepository:
         status: ProcessedStatus,
         *,
         rule_id: uuid.UUID | None = None,
+        reason: str | None = None,
     ) -> None:
         row = await self._db.get(Message, message_id)
         if row is None:
@@ -105,6 +106,8 @@ class MessageRepository:
         row.processed_status = status
         if rule_id is not None:
             row.rule_id = rule_id
+        if reason is not None:
+            row.status_reason = reason
         await self._db.flush()
 
     async def recent_in_chat(

@@ -205,9 +205,13 @@ export function BarChart({ points, color = '#4f8cff' }: { points: { day: string;
 }
 
 export function statusTone(status: string): keyof typeof TONES {
-  if (['ONLINE', 'HEALTHY', 'SENT', 'REPLIED'].includes(status)) return 'ok';
+  if (['ONLINE', 'HEALTHY', 'SENT', 'REPLIED', 'ACTED'].includes(status)) return 'ok';
   if (['ERROR', 'FAILED', 'DISABLED'].includes(status)) return 'bad';
-  if (['AUTH_REQUIRED', 'AUTHENTICATING', 'DEGRADED', 'HUMAN_REQUIRED', 'PENDING'].includes(status))
+  if (
+    ['AUTH_REQUIRED', 'AUTHENTICATING', 'DEGRADED', 'HUMAN_REQUIRED', 'PENDING', 'ESCALATED'].includes(
+      status,
+    )
+  )
     return 'warn';
   if (['MATCHED', 'ACTIVE', 'HOT'].includes(status)) return 'info';
   return 'mute';

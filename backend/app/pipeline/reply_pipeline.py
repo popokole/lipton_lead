@@ -36,11 +36,17 @@ from app.core.errors import AIError
 from app.core.logging import get_logger
 from app.database.repositories.rules import RuleRepository
 from app.database.session import Database
-from app.models import ActionStatus, ActionType, Scenario
+from app.models import ActionStatus, ActionType, ProcessedStatus, Scenario
 from app.rules.engine import RuleMatch
 from app.telegram.messages import NormalizedMessage
 
 logger = get_logger(__name__)
+
+_ACTION_TO_PROCESSED_STATUS: dict[ActionType, ProcessedStatus] = {
+    ActionType.REPLY: ProcessedStatus.REPLIED,
+    ActionType.IGNORE: ProcessedStatus.IGNORED,
+    ActionType.ESCALATE_TO_HUMAN: ProcessedStatus.ESCALATED,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +63,17 @@ class ReplyOutcome:
     @property
     def replied(self) -> bool:
         return self.action is ActionType.REPLY and self.status is ActionStatus.SENT
+
+    @property
+    def processed_status(self) -> ProcessedStatus:
+        """Итоговый статус сообщения-триггера по реально выполненному действию.
+
+        ActionStatus описывает жизненный цикл самого Action (ушло/не ушло),
+        а не бизнес-исход для панели — отсюда отдельный маппинг.
+        """
+        if self.status is not ActionStatus.SENT:
+            return ProcessedStatus.FAILED
+        return _ACTION_TO_PROCESSED_STATUS.get(self.action, ProcessedStatus.ACTED)
 
 
 class ReplyPipeline:

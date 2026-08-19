@@ -63,6 +63,10 @@ class Message(UUIDPrimaryKeyMixin, Base):
         nullable=False,
         default=ProcessedStatus.PENDING,
     )
+    # Человекочитаемая причина финального статуса — почему ИИ промолчал,
+    # почему эскалация, текст ошибки. Без этого поля причина оседала в
+    # Action.payload/EventLog и была недоступна оператору без похода в БД.
+    status_reason: Mapped[str | None] = mapped_column(sa.Text)
     rule_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), sa.ForeignKey("rules.id", ondelete="SET NULL")
     )

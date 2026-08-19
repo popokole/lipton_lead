@@ -1,13 +1,14 @@
 'use client';
 
 import { Shell } from '@/components/shell';
-import { BarChart, Card, Empty, ErrorText, PageHeader, Stat } from '@/components/ui';
+import { Badge, BarChart, Card, Empty, ErrorText, PageHeader, Stat, Table } from '@/components/ui';
 import { useApi, useRealtime } from '@/lib/hooks';
-import type { DashboardCounters, DashboardSeries } from '@/lib/types';
+import type { DashboardCounters, DashboardSeries, RuleStat } from '@/lib/types';
 
 export default function DashboardPage() {
   const counters = useApi<DashboardCounters>('/analytics/dashboard', 10_000);
   const series = useApi<DashboardSeries>('/analytics/series?days=14', 60_000);
+  const ruleStats = useApi<RuleStat[]>('/analytics/rules', 30_000);
   const realtime = useRealtime(25);
 
   return (
@@ -49,6 +50,28 @@ export default function DashboardPage() {
           <BarChart points={series.data?.leads ?? []} color="#fbbf24" />
         </Card>
       </div>
+
+      <Card title="Ответы по правилам" className="mt-6">
+        <ErrorText>{ruleStats.error}</ErrorText>
+        {(ruleStats.data?.length ?? 0) === 0 ? (
+          <Empty>Правил пока нет</Empty>
+        ) : (
+          <Table head={['Правило', 'Статус', 'Совпадений', 'Ответов']}>
+            {ruleStats.data?.map((rule) => (
+              <tr key={rule.rule_id} className="border-b border-ink-800/70 last:border-0">
+                <td className="py-2 pr-4 text-slate-200">{rule.rule_name}</td>
+                <td className="py-2 pr-4">
+                  <Badge tone={rule.enabled ? 'ok' : 'mute'}>
+                    {rule.enabled ? 'включено' : 'выключено'}
+                  </Badge>
+                </td>
+                <td className="py-2 pr-4 text-slate-400">{rule.matches}</td>
+                <td className="py-2 text-slate-300">{rule.replies}</td>
+              </tr>
+            ))}
+          </Table>
+        )}
+      </Card>
 
       <Card title="Живая лента" className="mt-6">
         {realtime.events.length === 0 ? (

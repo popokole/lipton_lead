@@ -208,12 +208,13 @@ class MonitorPipeline:
             reply_outcome = await self._reply.handle(
                 message, primary, chat_id=chat_id, message_id=message_id
             )
-            if reply_outcome.replied:
-                async with self._database.session() as db:
-                    await MessageRepository(db).set_status(
-                        message_id, ProcessedStatus.REPLIED, rule_id=primary.rule.id
-                    )
-                status = ProcessedStatus.REPLIED
+            # MATCHED — вход в конвейер, а не итог: без этого IGNORE/ESCALATE
+            # оставались бы неотличимы от «ещё обрабатывается».
+            status = reply_outcome.processed_status
+            async with self._database.session() as db:
+                await MessageRepository(db).set_status(
+                    message_id, status, rule_id=primary.rule.id, reason=reply_outcome.reason
+                )
 
         return PipelineOutcome(
             status=status,

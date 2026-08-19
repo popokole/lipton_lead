@@ -140,7 +140,8 @@ export interface Message {
   date: string;
   is_incoming: boolean;
   is_bot_reply: boolean;
-  processed_status: 'PENDING' | 'SKIPPED' | 'MATCHED' | 'REPLIED' | 'FAILED';
+  processed_status: 'PENDING' | 'SKIPPED' | 'MATCHED' | 'REPLIED' | 'IGNORED' | 'ESCALATED' | 'ACTED' | 'FAILED';
+  status_reason: string | null;
   rule_id: string | null;
 }
 
@@ -201,6 +202,24 @@ export interface Conversation {
   last_message_at: string | null;
 }
 
+export interface Escalation {
+  conversation_id: string;
+  account_id: string;
+  account_label: string | null;
+  peer_tg_id: number;
+  chat_id: string | null;
+  chat_title: string | null;
+  chat_username: string | null;
+  chat_has_avatar: boolean;
+  status: string;
+  reason: string | null;
+  suggested_reply: string | null;
+  notification_id: string | null;
+  summary: string | null;
+  last_message_at: string | null;
+  created_at: string;
+}
+
 export interface Worker {
   id: string;
   name: string;
@@ -238,6 +257,14 @@ export interface DashboardSeries {
   replies: DailyPoint[];
   leads: DailyPoint[];
   errors: DailyPoint[];
+}
+
+export interface RuleStat {
+  rule_id: string;
+  rule_name: string;
+  enabled: boolean;
+  matches: number;
+  replies: number;
 }
 
 export interface Page<T> {

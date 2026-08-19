@@ -17,7 +17,13 @@ CHAT = 777
 
 
 async def test_message_reaches_telegram() -> None:
-    sender = MessageSender(make_settings(send_min_interval_seconds=0))
+    sender = MessageSender(
+        make_settings(
+            send_min_interval_seconds=0,
+            reply_typing_delay_min_seconds=0,
+            reply_typing_delay_max_seconds=0,
+        )
+    )
     client = FakeTelegramClient()
 
     sent = await sender.send(ACCOUNT, client, chat_id=CHAT, text="привет", reply_to=42)
@@ -29,7 +35,13 @@ async def test_message_reaches_telegram() -> None:
 
 async def test_minimum_interval_is_respected() -> None:
     """Интервал защищает аккаунт от FloodWait, а не обходит лимиты Telegram."""
-    sender = MessageSender(make_settings(send_min_interval_seconds=0.2))
+    sender = MessageSender(
+        make_settings(
+            send_min_interval_seconds=0.2,
+            reply_typing_delay_min_seconds=0,
+            reply_typing_delay_max_seconds=0,
+        )
+    )
     client = FakeTelegramClient()
 
     started = asyncio.get_running_loop().time()
@@ -42,7 +54,13 @@ async def test_minimum_interval_is_respected() -> None:
 
 
 async def test_sends_are_serialised_per_account() -> None:
-    sender = MessageSender(make_settings(send_min_interval_seconds=0))
+    sender = MessageSender(
+        make_settings(
+            send_min_interval_seconds=0,
+            reply_typing_delay_min_seconds=0,
+            reply_typing_delay_max_seconds=0,
+        )
+    )
     client = FakeTelegramClient()
 
     await asyncio.gather(
@@ -53,7 +71,14 @@ async def test_sends_are_serialised_per_account() -> None:
 
 
 async def test_short_flood_wait_is_waited_out() -> None:
-    sender = MessageSender(make_settings(send_min_interval_seconds=0, flood_wait_max_seconds=600))
+    sender = MessageSender(
+        make_settings(
+            send_min_interval_seconds=0,
+            flood_wait_max_seconds=600,
+            reply_typing_delay_min_seconds=0,
+            reply_typing_delay_max_seconds=0,
+        )
+    )
     client = FakeTelegramClient(flood_wait_seconds=0)
 
     sent = await sender.send(ACCOUNT, client, chat_id=CHAT, text="после паузы")
@@ -63,7 +88,14 @@ async def test_short_flood_wait_is_waited_out() -> None:
 
 
 async def test_long_flood_wait_is_surfaced_not_slept_through() -> None:
-    sender = MessageSender(make_settings(send_min_interval_seconds=0, flood_wait_max_seconds=5))
+    sender = MessageSender(
+        make_settings(
+            send_min_interval_seconds=0,
+            flood_wait_max_seconds=5,
+            reply_typing_delay_min_seconds=0,
+            reply_typing_delay_max_seconds=0,
+        )
+    )
     client = FakeTelegramClient(flood_wait_seconds=3600)
 
     with pytest.raises(TelegramFloodWaitError) as exc_info:
@@ -74,7 +106,13 @@ async def test_long_flood_wait_is_surfaced_not_slept_through() -> None:
 
 
 async def test_interval_is_tracked_per_account() -> None:
-    sender = MessageSender(make_settings(send_min_interval_seconds=5))
+    sender = MessageSender(
+        make_settings(
+            send_min_interval_seconds=5,
+            reply_typing_delay_min_seconds=0,
+            reply_typing_delay_max_seconds=0,
+        )
+    )
     client = FakeTelegramClient()
     first, second = uuid.uuid4(), uuid.uuid4()
 
@@ -86,8 +124,73 @@ async def test_interval_is_tracked_per_account() -> None:
     assert elapsed < 1.0, "пауза одного аккаунта не должна задерживать другой"
 
 
+async def test_human_delay_marks_read_and_shows_typing() -> None:
+    """Перед отправкой аккаунт отмечает сообщение прочитанным и «печатает»."""
+    sender = MessageSender(
+        make_settings(
+            send_min_interval_seconds=0,
+            reply_typing_delay_min_seconds=0.05,
+            reply_typing_delay_max_seconds=0.08,
+        )
+    )
+    client = FakeTelegramClient()
+
+    started = asyncio.get_running_loop().time()
+    await sender.send(ACCOUNT, client, chat_id=CHAT, text="привет", reply_to=42)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert client.read_acknowledged == [(CHAT, 42)]
+    assert client.typing_actions == [(CHAT, "typing")]
+    assert 0.05 <= elapsed < 1.0
+
+
+async def test_human_delay_disabled_when_max_is_zero() -> None:
+    """max=0 — явный флаг «выключено», как и с send_min_interval_seconds."""
+    sender = MessageSender(
+        make_settings(
+            send_min_interval_seconds=0,
+            reply_typing_delay_min_seconds=0,
+            reply_typing_delay_max_seconds=0,
+        )
+    )
+    client = FakeTelegramClient()
+
+    await sender.send(ACCOUNT, client, chat_id=CHAT, text="привет", reply_to=42)
+
+    assert client.read_acknowledged == []
+    assert client.typing_actions == []
+
+
+async def test_human_delay_failure_does_not_block_send() -> None:
+    """Имитация — необязательное украшение: её сбой не должен срывать ответ."""
+
+    class BrokenTypingClient(FakeTelegramClient):
+        def action(self, entity: object, action: str) -> object:
+            raise RuntimeError("typing indicator unsupported here")
+
+    sender = MessageSender(
+        make_settings(
+            send_min_interval_seconds=0,
+            reply_typing_delay_min_seconds=0.01,
+            reply_typing_delay_max_seconds=0.02,
+        )
+    )
+    client = BrokenTypingClient()
+
+    sent = await sender.send(ACCOUNT, client, chat_id=CHAT, text="привет", reply_to=42)
+
+    assert sent.tg_message_id > 0
+    assert client.sent == [(CHAT, "привет", 42)]
+
+
 async def test_forget_clears_account_state() -> None:
-    sender = MessageSender(make_settings(send_min_interval_seconds=5))
+    sender = MessageSender(
+        make_settings(
+            send_min_interval_seconds=5,
+            reply_typing_delay_min_seconds=0,
+            reply_typing_delay_max_seconds=0,
+        )
+    )
     client = FakeTelegramClient()
 
     await sender.send(ACCOUNT, client, chat_id=CHAT, text="a")

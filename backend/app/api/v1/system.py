@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import timedelta
 from typing import Any
 
@@ -16,13 +17,21 @@ from app.models import (
     AccountStatus,
     Action,
     ActionStatus,
+    ActionType,
     AIRequest,
     Chat,
     EventLog,
     Lead,
     Message,
+    Rule,
 )
-from app.schemas.resources import DailyPoint, DashboardCounters, DashboardSeries, WorkerOut
+from app.schemas.resources import (
+    DailyPoint,
+    DashboardCounters,
+    DashboardSeries,
+    RuleStatOut,
+    WorkerOut,
+)
 
 workers_router = APIRouter(prefix="/workers", tags=["workers"])
 analytics_router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -124,3 +133,52 @@ async def series(
         leads=await by_day(Lead.first_seen_at, Lead),
         errors=await by_day(EventLog.ts, EventLog, EventLog.level == "WARNING"),
     )
+
+
+@analytics_router.get("/rules", response_model=list[RuleStatOut], summary="Ответы по правилам")
+async def rule_stats(_user: CurrentUser, db: DbDep) -> list[RuleStatOut]:
+    """Сколько раз каждое правило сработало и сколько из этого — реальные ответы.
+
+    Показываем все правила, включая ни разу не сработавшие: молчащее правило —
+    тоже сигнал оператору, а не то, что стоит прятать.
+    """
+    matches: dict[uuid.UUID, int] = {
+        row[0]: row[1]
+        for row in (
+            await db.execute(
+                select(Message.rule_id, func.count())
+                .where(Message.rule_id.is_not(None))
+                .group_by(Message.rule_id)
+            )
+        ).all()
+        if row[0] is not None
+    }
+    replies: dict[uuid.UUID, int] = {
+        row[0]: row[1]
+        for row in (
+            await db.execute(
+                select(Action.rule_id, func.count())
+                .where(
+                    Action.rule_id.is_not(None),
+                    Action.type == ActionType.REPLY,
+                    Action.status == ActionStatus.SENT,
+                )
+                .group_by(Action.rule_id)
+            )
+        ).all()
+        if row[0] is not None
+    }
+
+    rules = await db.scalars(select(Rule))
+    stats = [
+        RuleStatOut(
+            rule_id=rule.id,
+            rule_name=rule.name,
+            enabled=rule.enabled,
+            matches=matches.get(rule.id, 0),
+            replies=replies.get(rule.id, 0),
+        )
+        for rule in rules.all()
+    ]
+    stats.sort(key=lambda s: (s.replies, s.matches), reverse=True)
+    return stats

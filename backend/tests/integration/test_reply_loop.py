@@ -98,7 +98,12 @@ class Env:
 @pytest.fixture
 async def env(integration_settings: Settings, redis_client: Redis) -> AsyncIterator[Env]:
     settings = integration_settings.model_copy(
-        update={"send_min_interval_seconds": 0.0, "max_consecutive_ai_replies": 3}
+        update={
+            "send_min_interval_seconds": 0.0,
+            "max_consecutive_ai_replies": 3,
+            "reply_typing_delay_min_seconds": 0.0,
+            "reply_typing_delay_max_seconds": 0.0,
+        }
     )
     database = Database(settings)
     await database.connect()

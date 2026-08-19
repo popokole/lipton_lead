@@ -65,6 +65,22 @@ class FakeCodeRequest:
     phone_code_hash: str = "hash-not-a-secret"
 
 
+class FakeTypingAction:
+    """Подделка `client.action(entity, 'typing')` — просто async context manager."""
+
+    def __init__(self, client: FakeTelegramClient, entity: Any, action: str) -> None:
+        self._client = client
+        self._entity = entity
+        self._action = action
+
+    async def __aenter__(self) -> FakeTypingAction:
+        self._client.typing_actions.append((int(self._entity), self._action))
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        return None
+
+
 @dataclass
 class FakeTelegramClient:
     """Управляемый клиент: каждое поведение задаётся полем."""
@@ -82,6 +98,8 @@ class FakeTelegramClient:
     logged_out: bool = False
     handlers: list[tuple[Any, Any]] = field(default_factory=list)
     sent: list[tuple[int, str, int | None]] = field(default_factory=list)
+    read_acknowledged: list[tuple[int, int | None]] = field(default_factory=list)
+    typing_actions: list[tuple[int, str]] = field(default_factory=list)
     signed_in_with: dict[str, Any] = field(default_factory=dict)
     session: StringSession = field(default_factory=StringSession)
     _next_message_id: int = 1000
@@ -127,6 +145,12 @@ class FakeTelegramClient:
 
     async def get_dialogs(self, limit: int | None = None) -> list[FakeDialog]:
         return self.dialogs[:limit] if limit else self.dialogs
+
+    async def send_read_acknowledge(self, entity: Any, *, max_id: int | None = None) -> None:
+        self.read_acknowledged.append((int(entity), max_id))
+
+    def action(self, entity: Any, action: str) -> FakeTypingAction:
+        return FakeTypingAction(self, entity, action)
 
     async def get_entity(self, entity: Any) -> FakeUser:
         return FakeUser(id=int(entity) if str(entity).lstrip("-").isdigit() else 1)

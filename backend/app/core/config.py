@@ -86,6 +86,16 @@ class Settings(BaseSettings):
     # Минимальный интервал между отправками одного аккаунта — защита самого
     # аккаунта от FloodWait, а не средство обхода ограничений Telegram.
     send_min_interval_seconds: float = Field(default=3.0, ge=0, alias="SEND_MIN_INTERVAL_SECONDS")
+    # Перед отправкой ответа аккаунт отмечает сообщение прочитанным и
+    # какое-то время «печатает» — мгновенный ответ от живого человека
+    # выглядит подозрительно. Диапазон, а не фиксированное число, чтобы
+    # пауза не была одинаковой каждый раз.
+    reply_typing_delay_min_seconds: float = Field(
+        default=5.0, ge=0, alias="REPLY_TYPING_DELAY_MIN_SECONDS"
+    )
+    reply_typing_delay_max_seconds: float = Field(
+        default=8.0, ge=0, alias="REPLY_TYPING_DELAY_MAX_SECONDS"
+    )
     flood_wait_max_seconds: int = Field(default=600, ge=0, alias="FLOOD_WAIT_MAX_SECONDS")
     # tdata-папка Telegram Desktop обычно занимает единицы мегабайт;
     # запас нужен на профили с несколькими аккаунтами и кешем.

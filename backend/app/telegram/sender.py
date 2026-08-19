@@ -13,6 +13,7 @@ FloodWait, а не способ обойти ограничения Telegram —
 from __future__ import annotations
 
 import asyncio
+import random
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -57,7 +58,41 @@ class MessageSender:
         lock = self._locks.setdefault(account_id, asyncio.Lock())
         async with lock:
             await self._respect_interval(account_id)
+            target: Any = peer if peer is not None else chat_id
+            await self._simulate_human_delay(account_id, client, target, reply_to)
             return await self._send_once(account_id, client, chat_id, text, reply_to, peer)
+
+    async def _simulate_human_delay(
+        self,
+        account_id: uuid.UUID,
+        client: TelegramClientLike,
+        target: Any,
+        reply_to: int | None,
+    ) -> None:
+        """Отмечает сообщение прочитанным и «печатает» несколько секунд.
+
+        Мгновенный ответ на длинное сообщение выдаёт бота вернее, чем что
+        угодно другое. Имитация необязательна для доставки ответа: сбой
+        здесь не должен срывать саму отправку.
+        """
+        high = self._settings.reply_typing_delay_max_seconds
+        if high <= 0:
+            return
+        low = min(self._settings.reply_typing_delay_min_seconds, high)
+        delay = random.uniform(low, high)
+
+        try:
+            if reply_to is not None:
+                # max_id, не message: Telethon у голого int читает `.id`,
+                # а не трактует его как id сообщения — с message=<int> здесь
+                # падает AttributeError на каждом вызове.
+                await client.send_read_acknowledge(target, max_id=reply_to)
+            async with client.action(target, "typing"):
+                await asyncio.sleep(delay)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "human_delay_simulation_failed", account_id=str(account_id), detail=str(exc)
+            )
 
     async def _respect_interval(self, account_id: uuid.UUID) -> None:
         interval = self._settings.send_min_interval_seconds

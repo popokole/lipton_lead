@@ -65,6 +65,12 @@ class ProcessedStatus(StrEnum):
     SKIPPED = "SKIPPED"
     MATCHED = "MATCHED"
     REPLIED = "REPLIED"
+    # Правило сработало, ИИ (или cooldown) решил не отвечать — не «в процессе»
+    # и не ошибка, отдельный терминальный статус, иначе неотличимо от MATCHED.
+    IGNORED = "IGNORED"
+    ESCALATED = "ESCALATED"
+    # Не-REPLY действие правила выполнено (уведомление, лид, метка).
+    ACTED = "ACTED"
     FAILED = "FAILED"
 
 
