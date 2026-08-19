@@ -52,6 +52,24 @@ export default function SettingsPage() {
     }
   }
 
+  async function prepareOrSync(path: '/notify/prepare' | '/notify/sync') {
+    setBusy(true);
+    setError(null);
+    setMsg(null);
+    try {
+      const r = await api.post<{ created: number; existing: number; renamed: number; scenarios: number }>(path);
+      setMsg(
+        `Готово: сценариев ${r.scenarios}, создано топиков ${r.created}` +
+          (r.renamed ? `, переименовано ${r.renamed}` : '') +
+          (r.existing ? `, уже было ${r.existing}` : ''),
+      );
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function test() {
     setBusy(true);
     setError(null);
@@ -117,6 +135,20 @@ export default function SettingsPage() {
           </Button>
           <Button variant="ghost" disabled={busy || !status?.configured} onClick={test}>
             Проверить связь
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={busy || !status?.configured || !status?.group_id}
+            onClick={() => prepareOrSync('/notify/prepare')}
+          >
+            Подготовить группу
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={busy || !status?.configured || !status?.group_id}
+            onClick={() => prepareOrSync('/notify/sync')}
+          >
+            Синхронизировать
           </Button>
           <label className="flex items-center gap-2 text-sm text-slate-300">
             <input

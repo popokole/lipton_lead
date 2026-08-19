@@ -18,6 +18,10 @@ from app.notifications.notifier import NotifierBot, NotifyError
 router = APIRouter(prefix="/notify", tags=["notify"])
 
 
+def _build_notifier(runtime: RuntimeDep) -> NotifierBot:
+    return NotifierBot(build_secret_box(runtime.settings), proxy=runtime.settings.ai_proxy_url)
+
+
 class NotifyStatus(BaseModel):
     enabled: bool
     configured: bool
@@ -88,6 +92,32 @@ async def update_notify(
 
     await db.flush()
     return _status(row)
+
+
+@router.post("/prepare", summary="Подготовить группу: создать топики по сценариям")
+async def prepare_group(
+    _admin: AdminUser, runtime: RuntimeDep, db: DbDep
+) -> dict[str, int | bool]:
+    notifier = _build_notifier(runtime)
+    try:
+        return await notifier.sync_topics(db, rename=False)
+    except NotifyError as exc:
+        raise InvalidInputError(str(exc)) from exc
+    finally:
+        await notifier.close()
+
+
+@router.post("/sync", summary="Синхронизировать разделы под сценарии")
+async def sync_group(
+    _admin: AdminUser, runtime: RuntimeDep, db: DbDep
+) -> dict[str, int | bool]:
+    notifier = _build_notifier(runtime)
+    try:
+        return await notifier.sync_topics(db, rename=True)
+    except NotifyError as exc:
+        raise InvalidInputError(str(exc)) from exc
+    finally:
+        await notifier.close()
 
 
 @router.post("/test", summary="Проверить связь с ботом")

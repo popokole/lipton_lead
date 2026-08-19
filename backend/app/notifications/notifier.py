@@ -16,7 +16,7 @@ import uuid
 from typing import Any
 
 import httpx
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import EncryptedBlob, SecretBox
@@ -51,6 +51,57 @@ class NotifierBot:
         me = await self._call(token, "getMe")
         return str(me.get("username") or "")
 
+    async def sync_topics(self, db: AsyncSession, *, rename: bool) -> dict[str, Any]:
+        """Готовит группу: топик на каждый сценарий.
+
+        Проверяет, что группа — форум (иначе топики создать нельзя), затем на
+        каждый сценарий создаёт топик, если его ещё нет. При rename=True
+        приводит имя топика к текущему имени сценария (editForumTopic).
+        """
+        loaded = await self._load_settings(db, require_enabled=False)
+        if loaded is None:
+            raise NotifyError("Сначала сохраните токен бота и id группы")
+        token, group_id = loaded
+
+        chat = await self._call(token, "getChat", chat_id=group_id)
+        if not chat.get("is_forum"):
+            raise NotifyError(
+                "У группы не включены темы (Topics). Включите их в настройках "
+                "группы и сделайте бота админом с правом управлять темами."
+            )
+
+        scenarios = list((await db.scalars(select(Scenario))).all())
+        created = existing = renamed = 0
+        for scenario in scenarios:
+            if scenario.notify_topic_id is None:
+                topic = await self._call(
+                    token, "createForumTopic", chat_id=group_id, name=scenario.name[:128]
+                )
+                scenario.notify_topic_id = int(topic["message_thread_id"])
+                created += 1
+            else:
+                existing += 1
+                if rename:
+                    try:
+                        await self._call(
+                            token,
+                            "editForumTopic",
+                            chat_id=group_id,
+                            message_thread_id=scenario.notify_topic_id,
+                            name=scenario.name[:128],
+                        )
+                        renamed += 1
+                    except NotifyError:
+                        pass  # топик мог быть удалён вручную — не критично
+        await db.flush()
+        return {
+            "is_forum": True,
+            "scenarios": len(scenarios),
+            "created": created,
+            "existing": existing,
+            "renamed": renamed,
+        }
+
     async def notify_lead(
         self,
         db: AsyncSession,
@@ -83,9 +134,13 @@ class NotifierBot:
             logger.warning("notify_failed", detail=str(exc)[:200])
             await self._record_error(db, str(exc)[:300])
 
-    async def _load_settings(self, db: AsyncSession) -> tuple[str, int] | None:
+    async def _load_settings(
+        self, db: AsyncSession, *, require_enabled: bool = True
+    ) -> tuple[str, int] | None:
         row = await db.get(NotifySettings, SINGLETON_ID)
-        if row is None or not row.enabled or row.group_id is None:
+        if row is None or row.group_id is None:
+            return None
+        if require_enabled and not row.enabled:
             return None
         if not (row.bot_token_ct and row.bot_token_nonce and row.bot_token_key_id):
             return None
