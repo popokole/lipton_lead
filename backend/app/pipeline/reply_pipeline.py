@@ -338,7 +338,7 @@ class ReplyPipeline:
         # Лид = тот, кому мы ответили хотя бы раз. Балл берём из уверенности
         # ИИ (0..100); без AI-проверки — базовый, чтобы лид всё равно завёлся.
         if analysis is not None:
-            lead_score = int(round(analysis.result.confidence * 100))
+            lead_score = round(analysis.result.confidence * 100)
             intent = analysis.result.intent.value
         else:
             lead_score = 40
