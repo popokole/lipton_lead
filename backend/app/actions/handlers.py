@@ -18,7 +18,6 @@ from app.core.clock import utcnow
 from app.core.errors import TelegramError, TelegramFloodWaitError
 from app.core.logging import get_logger
 from app.database.repositories.conversations import ConversationRepository, LeadRepository
-from app.notifications.notifier import NotifierBot, format_lead_card
 from app.database.repositories.events import EventLogRepository
 from app.database.session import Database
 from app.models import (
@@ -29,6 +28,7 @@ from app.models import (
     ProcessedStatus,
 )
 from app.models import EventType as LogEventType
+from app.notifications.notifier import NotifierBot, format_lead_card
 from app.telegram.client_manager import ClientManager
 from app.telegram.peers import PeerCache
 from app.telegram.sender import MessageSender
@@ -49,7 +49,7 @@ class ReplyHandler:
     peers: PeerCache
     # Бот-уведомления: шлёт карточку лида в топик сценария. Опционально —
     # система работает и без отчётного бота.
-    notifier: "NotifierBot | None" = None
+    notifier: NotifierBot | None = None
 
     async def execute(self, request: ActionRequest, action_id: uuid.UUID) -> ActionResult:
         if not request.reply_text or not request.reply_text.strip():

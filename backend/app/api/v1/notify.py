@@ -64,7 +64,9 @@ async def update_notify(
 
     if payload.bot_token:
         # Проверяем токен и заодно узнаём username бота.
-        notifier = NotifierBot(build_secret_box(runtime.settings), proxy=runtime.settings.ai_proxy_url)
+        notifier = NotifierBot(
+            build_secret_box(runtime.settings), proxy=runtime.settings.ai_proxy_url
+        )
         try:
             username = await notifier.check(payload.bot_token)
         except NotifyError as exc:

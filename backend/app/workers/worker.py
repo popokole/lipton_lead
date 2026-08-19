@@ -48,6 +48,7 @@ from app.core.runtime import VERSION, Runtime
 from app.database.repositories.accounts import AccountRepository
 from app.database.repositories.workers import WorkerRepository
 from app.models import AccountStatus, ActionType, WorkerStatus
+from app.notifications.notifier import NotifierBot
 from app.pipeline.monitor_pipeline import MonitorPipeline
 from app.pipeline.reply_pipeline import ReplyPipeline
 from app.rules.engine import RuleEngine
@@ -57,7 +58,6 @@ from app.telegram.auth_flow import AuthFlow
 from app.telegram.client import TelethonClientFactory
 from app.telegram.client_manager import ClientManager
 from app.telegram.peers import PeerCache
-from app.notifications.notifier import NotifierBot
 from app.telegram.sender import MessageSender
 from app.telegram.session_manager import SessionManager
 from app.workers.command_handler import CommandHandler
