@@ -92,6 +92,15 @@ class GeneratedReply(BaseModel):
     # каждый раз. Пусто — используется запасная фраза сценария.
     group_text: str = ""
     used_knowledge: bool = False
+
+    @field_validator("text", "group_text", mode="after")
+    @classmethod
+    def _strip_long_dashes(cls, value: str) -> str:
+        # Длинное тире — характерный признак «машинного» текста. Убираем его
+        # из готового ответа: запятая на месте « — », иначе просто выкидываем.
+        cleaned = value.replace(" — ", ", ").replace(" – ", ", ")
+        cleaned = cleaned.replace("—", ",").replace("–", ",").replace("―", ",")
+        return cleaned.replace(" ,", ",").replace(",,", ",")
     # Модель сообщает, что не может ответить по имеющимся данным. Это честнее,
     # чем выдумать ответ, и приводит к передаче диалога человеку.
     refused: bool = False
