@@ -11,6 +11,7 @@ OPENAI_BASE_URL — ключи и адрес приходят из окруже�
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
@@ -258,7 +259,43 @@ def parse_structured[T: BaseModel](content: str, schema: type[T]) -> T:
     try:
         data = json.loads(text[start : end + 1])
         return schema.model_validate(data)
-    except (json.JSONDecodeError, ValidationError) as exc:
-        raise AIResponseFormatError(
-            f"AI response does not match {schema.__name__}: {exc}", raw_text=text
-        ) from exc
+    except (json.JSONDecodeError, ValidationError):
+        pass
+
+    # Последняя попытка: модели любят класть в JSON-строки живые переносы
+    # строк, на которых строгий json.loads падает. Достаём строковые поля
+    # схемы регуляркой — так «text»/«group_text» не утекут сырым JSON в чат.
+    salvaged = _salvage_fields(text, schema)
+    if salvaged:
+        try:
+            return schema.model_validate(salvaged)
+        except ValidationError:
+            pass
+
+    raise AIResponseFormatError(
+        f"AI response does not match {schema.__name__}", raw_text=text
+    )
+
+
+_STRING_FIELD = r'"{name}"\s*:\s*"((?:[^"\\]|\\.)*)"'
+
+
+def _salvage_fields[T: BaseModel](raw: str, schema: type[T]) -> dict[str, str]:
+    """Вытаскивает строковые поля схемы из кривого JSON регуляркой.
+
+    Модели любят класть в значения живые переносы строк — на них строгий
+    json.loads падает. Регулярка с re.S захватывает такие значения целиком,
+    после чего пробуем аккуратно распаковать escape-последовательности.
+    """
+    out: dict[str, str] = {}
+    for name in schema.model_fields:
+        pattern = _STRING_FIELD.format(name=re.escape(name))
+        match = re.search(pattern, raw, re.S)
+        if not match:
+            continue
+        value = match.group(1)
+        try:
+            out[name] = json.loads(f'"{value}"')
+        except json.JSONDecodeError:
+            out[name] = value.replace('\\"', '"')
+    return out
