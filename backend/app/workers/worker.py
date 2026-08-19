@@ -57,6 +57,7 @@ from app.telegram.auth_flow import AuthFlow
 from app.telegram.client import TelethonClientFactory
 from app.telegram.client_manager import ClientManager
 from app.telegram.peers import PeerCache
+from app.notifications.notifier import NotifierBot
 from app.telegram.sender import MessageSender
 from app.telegram.session_manager import SessionManager
 from app.workers.command_handler import CommandHandler
@@ -90,6 +91,7 @@ class Worker:
         self._sessions = SessionManager(build_secret_box(settings))
         self._sender = MessageSender(settings)
         self._peers = PeerCache()
+        self._notifier = NotifierBot(build_secret_box(settings), proxy=settings.ai_proxy_url)
         self._factory = TelethonClientFactory(settings)
         self._auth = AuthFlow(settings, self._factory)
         self._self_guard = SelfGuard()
@@ -198,7 +200,9 @@ class Worker:
         actions = ActionEngine(database)
         actions.register(
             ActionType.REPLY,
-            ReplyHandler(database, self._clients, self._sender, publisher, self._peers),
+            ReplyHandler(
+                database, self._clients, self._sender, publisher, self._peers, self._notifier
+            ),
         )
         actions.register(ActionType.NOTIFY_ADMIN, NotifyAdminHandler(database, publisher))
         actions.register(ActionType.SAVE_LEAD, SaveLeadHandler(database, publisher))
@@ -251,6 +255,8 @@ class Worker:
                 await task
         self._tasks.clear()
 
+        with contextlib.suppress(Exception):
+            await self._notifier.close()
         await self._auth.shutdown()
         if self._ai_provider is not None:
             with contextlib.suppress(Exception):

@@ -36,6 +36,7 @@ from app.models.knowledge import (
 )
 from app.models.lead import Lead
 from app.models.message import Message, ProcessedMessage
+from app.models.notify import NotifySettings
 from app.models.observability import AIRequest, AuditLog, EventLog, Notification, Worker
 from app.models.rule import Rule, RuleAccount, RuleChat
 from app.models.scenario import Scenario
@@ -67,6 +68,7 @@ __all__ = [
     "MediaType",
     "Message",
     "Notification",
+    "NotifySettings",
     "NotificationType",
     "ProcessedMessage",
     "ProcessedStatus",

@@ -20,6 +20,7 @@ const NAV = [
   { href: '/leads', label: 'Лиды' },
   { href: '/logs', label: 'Журнал' },
   { href: '/workers', label: 'Воркеры' },
+  { href: '/settings', label: 'Настройки' },
 ];
 
 /**

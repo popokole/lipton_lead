@@ -18,6 +18,7 @@ from app.core.clock import utcnow
 from app.core.errors import TelegramError, TelegramFloodWaitError
 from app.core.logging import get_logger
 from app.database.repositories.conversations import ConversationRepository, LeadRepository
+from app.notifications.notifier import NotifierBot, format_lead_card
 from app.database.repositories.events import EventLogRepository
 from app.database.session import Database
 from app.models import (
@@ -46,6 +47,9 @@ class ReplyHandler:
     # Пропуски в чаты, собранные из входящих событий: сессия из tdata приходит
     # без кеша сущностей, и отправить по одному id Telethon не сможет.
     peers: PeerCache
+    # Бот-уведомления: шлёт карточку лида в топик сценария. Опционально —
+    # система работает и без отчётного бота.
+    notifier: "NotifierBot | None" = None
 
     async def execute(self, request: ActionRequest, action_id: uuid.UUID) -> ActionResult:
         if not request.reply_text or not request.reply_text.strip():
@@ -188,6 +192,32 @@ class ReplyHandler:
                         payload={"score": lead.score, "status": lead.status.value},
                     )
                 )
+
+                if self.notifier is not None:
+                    from app.models import Scenario as _Scenario
+
+                    scenario_name = None
+                    if request.scenario_id is not None:
+                        scen = await db.get(_Scenario, request.scenario_id)
+                        scenario_name = scen.name if scen else None
+                    card = format_lead_card(
+                        scenario_name=scenario_name,
+                        account_label=str(request.account_id)[:8],
+                        chat_title=request.message.chat_title,
+                        sender_name=request.message.sender_display_name,
+                        sender_username=request.message.sender_username,
+                        sender_tg_id=request.message.sender_tg_id,
+                        incoming_text=request.message.text or "",
+                        reply_text=str(request.payload.get("dm_text") or request.reply_text or ""),
+                        score=lead.score,
+                        status=lead.status.value,
+                    )
+                    await self.notifier.notify_lead(
+                        db,
+                        scenario_id=request.scenario_id,
+                        scenario_name=scenario_name,
+                        text=card,
+                    )
 
 
 @dataclass

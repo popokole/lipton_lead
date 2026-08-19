@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api import ws
-from app.api.v1 import accounts, activity, auth, catalog, health, imports, proxies, system
+from app.api.v1 import accounts, activity, auth, catalog, health, imports, notify, proxies, system
 
 root_router = APIRouter()
 root_router.include_router(health.router)
@@ -15,6 +15,7 @@ api_router = APIRouter(prefix="/api")
 api_router.include_router(auth.router)
 api_router.include_router(accounts.router)
 api_router.include_router(imports.router)
+api_router.include_router(notify.router)
 api_router.include_router(proxies.router)
 api_router.include_router(catalog.chats_router)
 api_router.include_router(catalog.scenarios_router)
