@@ -11,11 +11,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from typing import Any
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import EncryptedBlob, SecretBox
@@ -43,7 +44,7 @@ class NotifierBot:
         data = resp.json()
         if not data.get("ok"):
             raise NotifyError(data.get("description") or f"Bot API {method} failed")
-        return data["result"]  # type: ignore[no-any-return]
+        return data["result"]
 
     async def check(self, token: str) -> str:
         """Проверяет токен, возвращает username бота."""
@@ -89,7 +90,9 @@ class NotifierBot:
         if not (row.bot_token_ct and row.bot_token_nonce and row.bot_token_key_id):
             return None
         token = self._box.decrypt_str(
-            EncryptedBlob(row.bot_token_ct, row.bot_token_nonce, row.bot_token_key_id, "AES-256-GCM"),
+            EncryptedBlob(
+                row.bot_token_ct, row.bot_token_nonce, row.bot_token_key_id, "AES-256-GCM"
+            ),
             aad="notify",
         )
         return token, row.group_id
@@ -129,14 +132,12 @@ class NotifierBot:
         return thread_id
 
     async def _record_error(self, db: AsyncSession, detail: str) -> None:
-        try:
+        with contextlib.suppress(Exception):
             await db.execute(
                 update(NotifySettings)
                 .where(NotifySettings.id == SINGLETON_ID)
                 .values(last_error=detail)
             )
-        except Exception:  # noqa: BLE001
-            pass
 
 
 class NotifyError(RuntimeError):
