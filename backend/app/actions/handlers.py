@@ -132,6 +132,36 @@ class ReplyHandler:
                 status="SENT",
             )
 
+            # Ответили человеку — значит это лид. Заводим/обновляем его прямо
+            # здесь: балл пришёл из уверенности ИИ через payload действия.
+            if request.message is not None and request.message.sender_tg_id is not None:
+                lead = await LeadRepository(db).upsert(
+                    request.account_id,
+                    request.message.sender_tg_id,
+                    score=int(request.payload.get("lead_score") or 40),
+                    intent=request.payload.get("intent"),
+                    username=request.message.sender_username,
+                    display_name=request.message.sender_display_name,
+                    source_chat_id=request.chat_id,
+                    conversation_id=request.conversation_id,
+                    scenario_id=request.scenario_id,
+                )
+                await EventLogRepository(db).add(
+                    LogEventType.LEAD_UPDATED,
+                    account_id=request.account_id,
+                    chat_id=request.chat_id,
+                    scenario_id=request.scenario_id,
+                    status=lead.status.value,
+                    extra={"score": lead.score, "tg_user_id": request.message.sender_tg_id},
+                )
+                await self.publisher.publish(
+                    Event(
+                        type=EventType.LEAD_UPDATED,
+                        account_id=request.account_id,
+                        payload={"score": lead.score, "status": lead.status.value},
+                    )
+                )
+
 
 @dataclass
 class NotifyAdminHandler:
