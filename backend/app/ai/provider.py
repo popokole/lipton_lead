@@ -46,6 +46,34 @@ class AnalysisResult(BaseModel):
     lead_score: int = Field(default=0, ge=0, le=100)
     reason: str = ""
 
+    @field_validator("intent", mode="before")
+    @classmethod
+    def _tolerant_intent(cls, value: object) -> object:
+        # Модель любит писать intent свободным текстом («запрос на психолога»).
+        # Неизвестное значение — не повод ронять весь анализ: считаем OTHER.
+        if isinstance(value, Intent):
+            return value
+        if isinstance(value, str):
+            key = value.strip().lower()
+            return key if key in {item.value for item in Intent} else Intent.OTHER
+        return Intent.OTHER
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _clamp_confidence(cls, value: object) -> object:
+        try:
+            return min(1.0, max(0.0, float(value)))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0.0
+
+    @field_validator("lead_score", mode="before")
+    @classmethod
+    def _clamp_score(cls, value: object) -> object:
+        try:
+            return min(100, max(0, int(float(value))))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
+
     @field_validator("reason")
     @classmethod
     def _trim_reason(cls, value: str) -> str:
