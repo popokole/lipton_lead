@@ -22,12 +22,22 @@ const TYPES = [
   'ERROR',
 ];
 
+const PAGE = 150;
+
 export default function LogsPage() {
   const [eventType, setEventType] = useState('');
+  const [offset, setOffset] = useState(0);
   const logs = useApi<Page<LogRow>>(
-    `/logs?limit=150${eventType ? `&event_type=${eventType}` : ''}`,
+    `/logs?limit=${PAGE}&offset=${offset}${eventType ? `&event_type=${eventType}` : ''}`,
     5000,
   );
+
+  const total = logs.data?.total ?? 0;
+  const shown = logs.data?.items.length ?? 0;
+  const changeType = (value: string) => {
+    setEventType(value);
+    setOffset(0);
+  };
 
   return (
     <Shell>
@@ -39,7 +49,7 @@ export default function LogsPage() {
           <select
             className={`${inputClass} max-w-xs`}
             value={eventType}
-            onChange={(event) => setEventType(event.target.value)}
+            onChange={(event) => changeType(event.target.value)}
           >
             {TYPES.map((type) => (
               <option key={type} value={type}>
@@ -50,7 +60,25 @@ export default function LogsPage() {
           <Button variant="ghost" onClick={() => void logs.reload()}>
             Обновить
           </Button>
-          <span className="text-xs text-slate-600">записей: {logs.data?.total ?? 0}</span>
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              variant="ghost"
+              disabled={offset === 0}
+              onClick={() => setOffset(Math.max(0, offset - PAGE))}
+            >
+              ← Новее
+            </Button>
+            <span className="whitespace-nowrap text-xs text-slate-500">
+              {total === 0 ? '0' : `${offset + 1}–${offset + shown}`} из {total}
+            </span>
+            <Button
+              variant="ghost"
+              disabled={offset + shown >= total}
+              onClick={() => setOffset(offset + PAGE)}
+            >
+              Старее →
+            </Button>
+          </div>
         </div>
       </Card>
 

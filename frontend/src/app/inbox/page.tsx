@@ -43,10 +43,14 @@ export default function InboxPage() {
     setSelected(null);
   }, [kind]);
 
-  // Открываем самый свежий тред текущей вкладки.
+  // Автовыбор всегда сверяется с ТЕКУЩИМ списком: если выбранного чата в нём
+  // нет (сменили вкладку, он исчез из выдачи) — открываем самый свежий. Так
+  // правая панель не залипает пустой на устаревшем id из другой вкладки.
   useEffect(() => {
-    if (selected === null && threads.data && threads.data.length > 0) {
-      setSelected(threads.data[0].chat_id);
+    if (!threads.data) return;
+    const stillThere = selected !== null && threads.data.some((t) => t.chat_id === selected);
+    if (!stillThere) {
+      setSelected(threads.data.length > 0 ? threads.data[0].chat_id : null);
     }
   }, [threads.data, selected]);
 

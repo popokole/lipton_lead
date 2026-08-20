@@ -247,9 +247,20 @@ async def list_threads(
     )
     has_messages = exists(select(Message.id).where(Message.chat_id == Chat.id))
 
+    # Берём только нужные скалярные колонки, не сущность Chat целиком: иначе
+    # SQLAlchemy тянет из БД бинарь аватара (LargeBinary) на каждую строку ради
+    # одного булева has_avatar. Тот же приём — в list_messages/list_logs.
     stmt = (
         select(
-            Chat,
+            Chat.id.label("chat_id"),
+            Chat.account_id.label("account_id"),
+            Chat.tg_chat_id.label("tg_chat_id"),
+            Chat.type.label("chat_type"),
+            Chat.title.label("title"),
+            Chat.username.label("username"),
+            Chat.monitored.label("monitored"),
+            Chat.last_message_at.label("last_message_at"),
+            (Chat.avatar.is_not(None)).label("has_avatar"),
             last_text.label("last_text"),
             func.coalesce(last_incoming, False).label("awaiting_reply"),
             msg_count.label("mcount"),
@@ -273,19 +284,18 @@ async def list_threads(
 
     threads: list[ThreadOut] = []
     for row in (await db.execute(stmt.limit(limit))).all():
-        chat = row[0]
         threads.append(
             ThreadOut(
-                chat_id=chat.id,
-                account_id=chat.account_id,
-                tg_chat_id=chat.tg_chat_id,
-                kind="dm" if chat.type is ChatType.PRIVATE else "group",
-                title=chat.title,
-                username=chat.username,
-                has_avatar=chat.avatar is not None,
-                monitored=chat.monitored,
+                chat_id=row.chat_id,
+                account_id=row.account_id,
+                tg_chat_id=row.tg_chat_id,
+                kind="dm" if row.chat_type == ChatType.PRIVATE else "group",
+                title=row.title,
+                username=row.username,
+                has_avatar=bool(row.has_avatar),
+                monitored=row.monitored,
                 message_count=int(row.mcount or 0),
-                last_message_at=chat.last_message_at,
+                last_message_at=row.last_message_at,
                 last_text=row.last_text,
                 awaiting_reply=bool(row.awaiting_reply),
                 lead_score=row.lead_score,

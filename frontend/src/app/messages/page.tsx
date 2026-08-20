@@ -18,16 +18,31 @@ import {
 import { useApi, useRealtime } from '@/lib/hooks';
 import type { ActionRow, Message, Page } from '@/lib/types';
 
+const PAGE = 50;
+
 export default function MessagesPage() {
   const [search, setSearch] = useState('');
   const [matchedOnly, setMatchedOnly] = useState(false);
-  const query = `/messages?limit=50&matched_only=${matchedOnly}${
+  const [offset, setOffset] = useState(0);
+  const query = `/messages?limit=${PAGE}&offset=${offset}&matched_only=${matchedOnly}${
     search ? `&search=${encodeURIComponent(search)}` : ''
   }`;
 
   const messages = useApi<Page<Message>>(query, 8000);
   const actions = useApi<Page<ActionRow>>('/actions?limit=25', 8000);
   const realtime = useRealtime(40);
+
+  const total = messages.data?.total ?? 0;
+  const shown = messages.data?.items.length ?? 0;
+  // Смена фильтра означает новый набор — начинаем с первой страницы.
+  const changeSearch = (value: string) => {
+    setSearch(value);
+    setOffset(0);
+  };
+  const changeMatched = (value: boolean) => {
+    setMatchedOnly(value);
+    setOffset(0);
+  };
 
   return (
     <Shell>
@@ -48,13 +63,13 @@ export default function MessagesPage() {
             className={`${inputClass} max-w-xs`}
             placeholder="Поиск по тексту"
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => changeSearch(event.target.value)}
           />
           <label className="flex items-center gap-2 text-sm text-slate-400">
             <input
               type="checkbox"
               checked={matchedOnly}
-              onChange={(event) => setMatchedOnly(event.target.checked)}
+              onChange={(event) => changeMatched(event.target.checked)}
               className="h-4 w-4 rounded border-ink-600 bg-ink-950"
             />
             только совпавшие с правилом
@@ -62,7 +77,25 @@ export default function MessagesPage() {
           <Button variant="ghost" onClick={() => void messages.reload()}>
             Обновить
           </Button>
-          <span className="text-xs text-slate-600">всего: {messages.data?.total ?? 0}</span>
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              variant="ghost"
+              disabled={offset === 0}
+              onClick={() => setOffset(Math.max(0, offset - PAGE))}
+            >
+              ← Новее
+            </Button>
+            <span className="whitespace-nowrap text-xs text-slate-500">
+              {total === 0 ? '0' : `${offset + 1}–${offset + shown}`} из {total}
+            </span>
+            <Button
+              variant="ghost"
+              disabled={offset + shown >= total}
+              onClick={() => setOffset(offset + PAGE)}
+            >
+              Старее →
+            </Button>
+          </div>
         </div>
       </Card>
 
