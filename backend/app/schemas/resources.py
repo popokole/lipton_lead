@@ -368,6 +368,24 @@ class LeadOut(ORMModel):
     notes: str | None
 
 
+class ThreadOut(BaseModel):
+    """Строка списка «Общение»: диалог с лидом плюс превью последней реплики."""
+
+    conversation_id: uuid.UUID
+    account_id: uuid.UUID
+    peer_tg_id: int
+    username: str | None
+    display_name: str | None
+    status: ConversationStatus
+    lead_score: int
+    lead_status: LeadStatus
+    message_count: int
+    last_message_at: datetime | None
+    last_text: str | None
+    # Последнее сообщение — входящее: значит ждёт нашего ответа.
+    awaiting_reply: bool
+
+
 # --- воркеры и сводка ------------------------------------------------------
 class WorkerOut(BaseModel):
     id: str

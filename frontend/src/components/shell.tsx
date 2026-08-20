@@ -17,6 +17,7 @@ const NAV = [
   { href: '/rules', label: 'Правила' },
   { href: '/messages', label: 'Сообщения' },
   { href: '/conversations', label: 'Диалоги' },
+  { href: '/inbox', label: 'Общение' },
   { href: '/leads', label: 'Лиды' },
   { href: '/logs', label: 'Журнал' },
   { href: '/workers', label: 'Воркеры' },

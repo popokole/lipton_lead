@@ -6,15 +6,16 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Query
-from sqlalchemy import Select, func, select
+from pydantic import BaseModel, Field
+from sqlalchemy import Select, and_, func, select
 from sqlalchemy import update as sa_update
 
-from app.api.deps import CurrentUser, DbDep, OperatorUser, RedisDep
+from app.api.deps import CommandBusDep, CurrentUser, DbDep, OperatorUser, RedisDep
 from app.bus.events import EventPublisher
-from app.bus.messages import Event
+from app.bus.messages import Command, CommandType, Event
 from app.bus.messages import EventType as BusEventType
 from app.core.clock import utcnow
-from app.core.errors import NotFoundError
+from app.core.errors import AppError, InvalidInputError, NotFoundError
 from app.database.repositories.conversations import ConversationRepository
 from app.database.repositories.events import EventLogRepository
 from app.models import (
@@ -30,6 +31,7 @@ from app.models import (
     Message,
     Notification,
     NotificationType,
+    ProcessedStatus,
 )
 from app.schemas.common import Ok, Page
 from app.schemas.resources import (
@@ -39,6 +41,7 @@ from app.schemas.resources import (
     EventLogOut,
     LeadOut,
     MessageOut,
+    ThreadOut,
 )
 
 messages_router = APIRouter(prefix="/messages", tags=["messages"])
@@ -204,6 +207,179 @@ async def list_conversations(
         stmt = stmt.where(Conversation.account_id == account_id)
     rows = await db.scalars(stmt.limit(limit))
     return [ConversationOut.model_validate(row) for row in rows.all()]
+
+
+@conversations_router.get("/threads", response_model=list[ThreadOut], summary="Треды общения")
+async def list_threads(
+    _user: CurrentUser,
+    db: DbDep,
+    account_id: uuid.UUID | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=300),
+) -> list[ThreadOut]:
+    """Список диалогов, у которых есть лид: с кем реально общаемся.
+
+    Общение имеет смысл только там, где есть лид (кому мы хоть раз ответили),
+    поэтому список строится join'ом диалога к лиду по (аккаунт, tg_id).
+    Превью последней реплики и признак «ждёт ответа» берутся коррелированными
+    подзапросами — без отдельного похода за каждым сообщением.
+    """
+    last_msg = (
+        select(Message.text, Message.is_incoming)
+        .where(Message.conversation_id == Conversation.id)
+        .order_by(Message.date.desc())
+        .limit(1)
+        .correlate(Conversation)
+    )
+    last_text = last_msg.with_only_columns(Message.text).scalar_subquery()
+    last_incoming = last_msg.with_only_columns(Message.is_incoming).scalar_subquery()
+
+    stmt = (
+        select(
+            Conversation,
+            Lead.username,
+            Lead.display_name,
+            Lead.score.label("lead_score"),
+            Lead.status.label("lead_status"),
+            last_text.label("last_text"),
+            func.coalesce(last_incoming, False).label("awaiting_reply"),
+        )
+        .join(
+            Lead,
+            and_(
+                Lead.account_id == Conversation.account_id,
+                Lead.tg_user_id == Conversation.peer_tg_id,
+            ),
+        )
+        .order_by(Conversation.last_message_at.desc().nullslast())
+    )
+    if account_id is not None:
+        stmt = stmt.where(Conversation.account_id == account_id)
+
+    threads: list[ThreadOut] = []
+    for row in (await db.execute(stmt.limit(limit))).all():
+        conversation = row[0]
+        threads.append(
+            ThreadOut(
+                conversation_id=conversation.id,
+                account_id=conversation.account_id,
+                peer_tg_id=conversation.peer_tg_id,
+                username=row.username,
+                display_name=row.display_name,
+                status=conversation.status,
+                lead_score=row.lead_score,
+                lead_status=row.lead_status,
+                message_count=conversation.message_count,
+                last_message_at=conversation.last_message_at,
+                last_text=row.last_text,
+                awaiting_reply=bool(row.awaiting_reply),
+            )
+        )
+    return threads
+
+
+@conversations_router.get(
+    "/{conversation_id}/messages", response_model=list[MessageOut], summary="Переписка диалога"
+)
+async def thread_messages(
+    conversation_id: uuid.UUID,
+    _user: CurrentUser,
+    db: DbDep,
+    limit: int = Query(default=200, ge=1, le=500),
+) -> list[MessageOut]:
+    conversation = await db.get(Conversation, conversation_id)
+    if conversation is None:
+        raise NotFoundError("Диалог не найден")
+
+    # Берём последние `limit` сообщений (по убыванию), затем разворачиваем в
+    # хронологию — так лента открывается на свежих репликах, а не на первой.
+    rows = await db.scalars(
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.date.desc())
+        .limit(limit)
+    )
+    items = [MessageOut.model_validate(message) for message in rows.all()]
+    items.reverse()
+    return items
+
+
+class ThreadReplyIn(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    reply_to: int | None = None
+
+
+@conversations_router.post(
+    "/{conversation_id}/reply", response_model=MessageOut, summary="Ответить в диалоге"
+)
+async def thread_reply(
+    conversation_id: uuid.UUID,
+    payload: ThreadReplyIn,
+    _user: OperatorUser,
+    bus: CommandBusDep,
+    db: DbDep,
+) -> MessageOut:
+    """Оператор пишет собеседнику вручную от имени аккаунта.
+
+    Отправку выполняет воркер-владелец аккаунта (единственный держатель
+    TelegramClient). Отправленное помечаем `is_bot_reply=True`, чтобы конвейер
+    не принял его за входящее и аккаунт не начал отвечать сам себе.
+    """
+    conversation = await db.get(Conversation, conversation_id)
+    if conversation is None:
+        raise NotFoundError("Диалог не найден")
+
+    command_payload: dict[str, Any] = {
+        "chat_id": conversation.peer_tg_id,
+        "text": payload.text,
+    }
+    if payload.reply_to is not None:
+        command_payload["reply_to"] = payload.reply_to
+
+    try:
+        result = await bus.call(
+            Command(
+                type=CommandType.SEND_MESSAGE,
+                account_id=conversation.account_id,
+                payload=command_payload,
+            ),
+            timeout_seconds=60,
+        )
+    except AppError as exc:
+        raise InvalidInputError(f"Не удалось отправить: {exc}") from exc
+    if not result.ok:
+        raise InvalidInputError(result.error_message or "Воркер не смог отправить сообщение")
+
+    now = utcnow()
+    message = Message(
+        account_id=conversation.account_id,
+        chat_id=conversation.chat_id,
+        conversation_id=conversation.id,
+        tg_chat_id=conversation.peer_tg_id,
+        tg_message_id=int(result.data["tg_message_id"]),
+        text=payload.text,
+        date=now,
+        reply_to_tg_message_id=payload.reply_to,
+        is_incoming=False,
+        is_outgoing=True,
+        is_bot_reply=True,
+        processed_status=ProcessedStatus.REPLIED,
+    )
+    db.add(message)
+    # Ручной ответ не должен раздувать счётчик петли ai_replies_in_row —
+    # обновляем только активность диалога и время последнего ответа.
+    conversation.message_count += 1
+    conversation.last_message_at = now
+    conversation.last_reply_at = now
+    await db.execute(
+        sa_update(Lead)
+        .where(
+            Lead.account_id == conversation.account_id,
+            Lead.tg_user_id == conversation.peer_tg_id,
+        )
+        .values(last_seen_at=now)
+    )
+    await db.flush()
+    return MessageOut.model_validate(message)
 
 
 @leads_router.get("", response_model=list[LeadOut], summary="Лиды")
