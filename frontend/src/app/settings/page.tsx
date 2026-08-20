@@ -176,6 +176,106 @@ export default function SettingsPage() {
           </div>
         )}
       </Card>
+
+      <PersonaCard />
     </Shell>
+  );
+}
+
+interface PersonaState {
+  enabled: boolean;
+  character: string | null;
+  examples: string | null;
+}
+
+/** Глобальная «личность» ИИ: характер и примеры переписки. */
+function PersonaCard() {
+  const [enabled, setEnabled] = useState(false);
+  const [character, setCharacter] = useState('');
+  const [examples, setExamples] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const p = await api.get<PersonaState>('/persona');
+        setEnabled(p.enabled);
+        setCharacter(p.character ?? '');
+        setExamples(p.examples ?? '');
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : String(err));
+      }
+    })();
+  }, []);
+
+  async function save(patch: Record<string, unknown>) {
+    setBusy(true);
+    setError(null);
+    setMsg(null);
+    try {
+      const p = await api.put<PersonaState>('/persona', patch);
+      setEnabled(p.enabled);
+      setMsg('Сохранено');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card title="Личность собеседника">
+      <p className="mb-4 text-sm text-slate-400">
+        Единая «личность» для всех ответов ИИ: кто он и как пишет. Подмешивается{' '}
+        <b>поверх</b> промпта сценария — сценарий решает, что и кому отвечать, а личность задаёт
+        характер и тон. Примеры переписки работают как образец стиля, дословно не копируются.
+      </p>
+      {error && <ErrorText>{error}</ErrorText>}
+      {msg && (
+        <p className="mb-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
+          {msg}
+        </p>
+      )}
+
+      <div className="grid gap-4">
+        <Field label="Характер / кто это" hint="Имя, возраст, привычки речи, что можно и нельзя">
+          <textarea
+            className={`${inputClass} min-h-32 resize-y`}
+            value={character}
+            onChange={(e) => setCharacter(e.target.value)}
+            placeholder={'например: Настя, 26 лет, живая и дружелюбная, пишет с маленькой буквы, без официоза, короткими фразами…'}
+          />
+        </Field>
+        <Field label="Примеры переписки (история)" hint="Реальные фразы этого человека — по одной на строку. Задают тон">
+          <textarea
+            className={`${inputClass} min-h-40 resize-y`}
+            value={examples}
+            onChange={(e) => setExamples(e.target.value)}
+            placeholder={'привет) да я как раз недавно так же искала\nне, это вообще не сложно, сейчас скину\nой, у меня то же самое было, помогло вот что…'}
+          />
+        </Field>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <Button disabled={busy} onClick={() => save({ character, examples })}>
+          {busy ? 'Сохраняем…' : 'Сохранить'}
+        </Button>
+        <label className="flex items-center gap-2 text-sm text-slate-300">
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={busy}
+            onChange={(e) => save({ enabled: e.target.checked })}
+            className="h-4 w-4 rounded border-ink-600 bg-ink-950"
+          />
+          Включить личность
+        </label>
+        <span className="text-xs text-slate-500">
+          {enabled ? 'личность применяется ко всем ответам' : 'выключена — отвечаем только по сценарию'}
+        </span>
+      </div>
+    </Card>
   );
 }

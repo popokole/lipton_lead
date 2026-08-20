@@ -168,6 +168,10 @@ class GenerateRequest(BaseModel):
     conversation_summary: str | None = None
     require_grounding: bool = False
     reply_in_dm: bool = False
+    # Глобальная «личность»: характер и примеры переписки. Подмешиваются поверх
+    # промпта сценария — задают, КАК звучит ответ, не меняя, ЧТО отвечать.
+    persona: str | None = None
+    persona_examples: str | None = None
     max_reply_length: int | None = None
     model: str | None = None
     temperature: float | None = None

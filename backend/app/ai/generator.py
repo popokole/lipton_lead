@@ -24,12 +24,19 @@ from app.ai.provider import (
     Summary,
     Usage,
 )
+from app.core.clock import get_clock
 from app.core.errors import AIBudgetExceededError, AIError
 from app.core.logging import get_logger
 from app.database.session import Database
 from app.models import AIPurpose
+from app.models.persona import SINGLETON_ID as PERSONA_ID
+from app.models.persona import Persona
 
 logger = get_logger(__name__)
+
+# Личность глобальна и меняется редко — держим её в памяти и обновляем не чаще
+# раза в PERSONA_CACHE_TTL секунд, чтобы не ходить в базу на каждое сообщение.
+PERSONA_CACHE_TTL = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +81,34 @@ class AIGenerator:
         self._budget = budget
         self._recorder = recorder
         self._database = database
+        self._persona: tuple[str | None, str | None] = (None, None)
+        self._persona_at: float | None = None
+
+    async def _load_persona(self) -> tuple[str | None, str | None]:
+        """Возвращает (характер, примеры) включённой личности или (None, None).
+
+        Кэшируется на PERSONA_CACHE_TTL секунд: правка личности в панели
+        применяется в течение полуминуты, без похода в базу на каждый ответ.
+        """
+        now = get_clock().monotonic()
+        if self._persona_at is not None and now - self._persona_at < PERSONA_CACHE_TTL:
+            return self._persona
+
+        character: str | None = None
+        examples: str | None = None
+        try:
+            async with self._database.session() as db:
+                row = await db.get(Persona, PERSONA_ID)
+            if row is not None and row.enabled:
+                character = row.character
+                examples = row.examples
+        except Exception as exc:  # noqa: BLE001 — личность не важнее ответа
+            logger.warning("persona_load_failed", detail=str(exc)[:200])
+            return self._persona  # отдаём прошлое значение, не роняем генерацию
+
+        self._persona = (character, examples)
+        self._persona_at = now
+        return self._persona
 
     async def generate(
         self,
@@ -100,6 +135,8 @@ class AIGenerator:
                 failure_reason="в базе знаний нет данных для ответа",
             )
 
+        persona, persona_examples = await self._load_persona()
+
         request = GenerateRequest(
             system_prompt=scenario.system_prompt,
             message_text=message_text,
@@ -109,6 +146,8 @@ class AIGenerator:
             conversation_summary=conversation_summary,
             require_grounding=scenario.require_grounding,
             reply_in_dm=scenario.reply_in_dm,
+            persona=persona,
+            persona_examples=persona_examples,
             max_reply_length=scenario.max_reply_length,
             model=scenario.model,
             temperature=scenario.temperature,

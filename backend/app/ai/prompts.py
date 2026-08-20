@@ -76,6 +76,20 @@ def build_analyze_messages(request: AnalyzeRequest) -> list[ChatMessage]:
 def build_generate_messages(request: GenerateRequest) -> list[ChatMessage]:
     system_parts = [request.system_prompt.strip(), GENERATOR_BASE_RULES]
 
+    # Личность идёт ПОСЛЕ правил сценария и общих правил: она задаёт голос, а
+    # не отменяет их. Примеры переписки — few-shot, перенимаем тон, не копируем.
+    if request.persona and request.persona.strip():
+        system_parts.append(
+            "Твоя личность — говори и веди себя именно так, "
+            "это твой характер и манера речи:\n" + request.persona.strip()
+        )
+    if request.persona_examples and request.persona_examples.strip():
+        system_parts.append(
+            "Примеры того, как ты обычно пишешь. Перенимай тон и манеру, "
+            "но НЕ копируй дословно, каждый раз формулируй по-новому:\n"
+            + request.persona_examples.strip()
+        )
+
     if request.require_grounding:
         system_parts.append(
             "Отвечай строго по базе знаний. Если ответа в ней нет — refused = true."
