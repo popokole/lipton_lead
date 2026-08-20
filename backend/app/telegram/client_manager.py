@@ -244,6 +244,16 @@ class ClientManager:
 
         if self._handler_factory is not None:
             self._register_handlers(entry)
+            # Догоняем апдейты, пропущенные за простой/переподключение. Обработчик
+            # уже навешен, поэтому события из catch_up пройдут через конвейер, а
+            # повторы отсечёт claim() по processed_messages. Сбой догона не должен
+            # ронять подключение — это лучшее усилие, а не обязательный шаг.
+            try:
+                await client.catch_up()
+            except Exception as exc:  # noqa: BLE001 — догон не критичнее подключения
+                logger.warning(
+                    "catch_up_failed", account_id=str(entry.account_id), detail=str(exc)[:200]
+                )
 
         entry.ready.set()
         await self._set_status(entry, AccountStatus.ONLINE, None)

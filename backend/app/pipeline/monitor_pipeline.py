@@ -24,7 +24,7 @@ from typing import Any
 from app.bus.events import EventPublisher
 from app.bus.messages import Event
 from app.bus.messages import EventType as BusEventType
-from app.core.clock import get_clock
+from app.core.clock import get_clock, utcnow
 from app.core.config import Settings
 from app.core.logging import get_logger
 from app.database.repositories.chats import ChatRepository
@@ -39,6 +39,11 @@ from app.telegram.messages import MessageNormalizer, NormalizedMessage
 from app.telegram.peers import PeerCache, extract_input_peer, extract_input_sender
 
 logger = get_logger(__name__)
+
+# Догнанные при переподключении старые сообщения сохраняем, но НЕ отвечаем на
+# них: иначе после долгого простоя аккаунт разом отвечает на весь бэклог и
+# выглядит как спам. Свежие (в пределах окна) обрабатываем как обычно.
+REPLY_MAX_AGE_SECONDS = 600
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,11 +175,21 @@ class MonitorPipeline:
         )
 
         scope = RuleScope.DIALOG if message.is_private else RuleScope.CHAT_MONITOR
+        # Старьё из догона (catch_up) только сохраняем: отвечать на бэклог после
+        # простоя нельзя — это выглядит как спам и грозит баном.
+        age_seconds = (utcnow() - message.date).total_seconds()
+        fresh = age_seconds <= REPLY_MAX_AGE_SECONDS
         # Ответы — только в личке и в отслеживаемых чатах. В остальных сообщение
         # прочитано и сохранено, но правила не запускаются.
-        if message.is_private or chat_monitored:
+        if fresh and (message.is_private or chat_monitored):
             matches = await self._rules.match_all(message, chat_id=chat_id, scope=scope)
         else:
+            if not fresh:
+                logger.info(
+                    "stale_message_stored_no_reply",
+                    age_seconds=int(age_seconds),
+                    **message.for_log(),
+                )
             matches = []
 
         status = ProcessedStatus.MATCHED if matches else ProcessedStatus.SKIPPED

@@ -26,6 +26,8 @@ class TelegramClientLike(Protocol):
 
     async def connect(self) -> None: ...
 
+    async def catch_up(self) -> None: ...
+
     async def disconnect(self) -> None: ...
 
     async def is_user_authorized(self) -> bool: ...
@@ -101,6 +103,10 @@ class TelethonClientFactory:
             connection_retries=None,
             retry_delay=self._settings.telegram_reconnect_base_delay,
             auto_reconnect=True,
+            # Догоняем апдейты, пропущенные за время простоя/переподключения:
+            # без этого сообщения из окна рестарта теряются навсегда. Повторную
+            # обработку отсекает claim() по processed_messages.
+            catch_up=True,
             proxy=proxy,
         )
         logger.debug("telegram_client_created", account_id=str(account_id))
