@@ -391,6 +391,8 @@ class ThreadOut(BaseModel):
     awaiting_reply: bool
     lead_score: int | None = None
     lead_status: LeadStatus | None = None
+    # Групповой чат: включён ли режим «общение ИИ» (бот отвечает по решению ИИ).
+    ai_chat: bool = False
 
 
 # --- воркеры и сводка ------------------------------------------------------

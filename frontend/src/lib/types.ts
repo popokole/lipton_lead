@@ -208,6 +208,7 @@ export interface Thread {
   awaiting_reply: boolean;
   lead_score: number | null;
   lead_status: string | null;
+  ai_chat: boolean;
 }
 
 export interface Conversation {

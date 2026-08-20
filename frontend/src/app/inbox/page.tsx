@@ -151,7 +151,22 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [togglingAi, setTogglingAi] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+
+  const toggleAiChat = async () => {
+    if (togglingAi) return;
+    setTogglingAi(true);
+    setError(null);
+    try {
+      await api.post(`/conversations/${thread.chat_id}/ai-chat`, { enabled: !thread.ai_chat });
+      onSent();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setTogglingAi(false);
+    }
+  };
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
@@ -191,9 +206,25 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
             </div>
           </div>
         </div>
-        {thread.kind === 'dm' && thread.lead_score != null && (
-          <Badge tone="info">лид {thread.lead_score}</Badge>
-        )}
+        <div className="flex items-center gap-2">
+          {thread.kind === 'dm' && thread.lead_score != null && (
+            <Badge tone="info">лид {thread.lead_score}</Badge>
+          )}
+          {thread.kind === 'group' && (
+            <button
+              onClick={() => void toggleAiChat()}
+              disabled={togglingAi}
+              title="Бот отвечает в этой группе по решению ИИ (не на всё подряд)"
+              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition disabled:opacity-50 ${
+                thread.ai_chat
+                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                  : 'border border-ink-600 text-slate-400 hover:bg-ink-800'
+              }`}
+            >
+              {togglingAi ? '…' : thread.ai_chat ? '● Общение ИИ включено' : '○ Включить общение ИИ'}
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="flex-1 space-y-2 overflow-y-auto px-4 py-4">

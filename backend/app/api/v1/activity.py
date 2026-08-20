@@ -7,7 +7,8 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import Select, and_, exists, func, select
+from sqlalchemy import Select, and_, exists, func, literal, select
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 
 from app.api.deps import CommandBusDep, CurrentUser, DbDep, OperatorUser, RedisDep
@@ -33,7 +34,11 @@ from app.models import (
     Notification,
     NotificationType,
     ProcessedStatus,
+    Rule,
+    RuleChat,
+    Scenario,
 )
+from app.models.enums import ActionType, RuleScope
 from app.schemas.common import Ok, Page
 from app.schemas.resources import (
     ActionOut,
@@ -212,6 +217,58 @@ async def list_conversations(
 
 _GROUP_TYPES = (ChatType.GROUP, ChatType.SUPERGROUP)
 
+# Единое правило разговорного режима в группах: действует только в тех чатах,
+# где оператор включил кнопку в «Общении» (привязка через rule_chats). ИИ сам
+# решает, стоит ли отвечать, — не на всё подряд.
+GROUP_CHAT_RULE_NAME = "Группа — общение ИИ"
+GROUP_CHAT_SCENARIO_NAME = "Групповое общение"
+GROUP_CHAT_PROMPT = (
+    "ты обычный участник группового чата и пишешь как живой человек. вступай в "
+    "разговор только когда есть что сказать по делу или можешь естественно "
+    "поддержать беседу. не отвечай на всё подряд, не спамь, не повторяйся. "
+    "коротко, с маленькой буквы, без официоза, без длинных тире."
+)
+
+
+async def _get_group_chat_rule(db: DbDep, *, create: bool) -> Rule | None:
+    """Возвращает (создавая при create=True) правило разговорного режима групп."""
+    rule = await db.scalar(select(Rule).where(Rule.name == GROUP_CHAT_RULE_NAME))
+    if rule is not None or not create:
+        return rule
+    scenario = await db.scalar(select(Scenario).where(Scenario.name == GROUP_CHAT_SCENARIO_NAME))
+    if scenario is None:
+        scenario = Scenario(
+            name=GROUP_CHAT_SCENARIO_NAME,
+            system_prompt=GROUP_CHAT_PROMPT,
+            human_handoff_enabled=False,
+            require_knowledge_grounding=False,
+            reply_in_dm=False,
+            max_reply_length=250,
+            context_messages=12,
+            enabled=True,
+        )
+        db.add(scenario)
+        await db.flush()
+    rule = Rule(
+        name=GROUP_CHAT_RULE_NAME,
+        enabled=False,  # включается, как только появится первый привязанный чат
+        priority=20,  # ниже тематических правил (1000): их темы имеют приоритет
+        stop_on_match=True,
+        scope=RuleScope.CHAT_MONITOR,
+        scenario_id=scenario.id,
+        keywords={},
+        filters={},
+        regex=None,
+        ai_enabled=True,  # ИИ решает, отвечать ли — «по уму», не на всё подряд
+        ai_threshold=0.5,
+        cooldown={"user": 30},
+        action=ActionType.REPLY,
+        action_config={},
+    )
+    db.add(rule)
+    await db.flush()
+    return rule
+
 
 @conversations_router.get("/threads", response_model=list[ThreadOut], summary="Треды общения")
 async def list_threads(
@@ -228,6 +285,21 @@ async def list_threads(
     подтягиваем балл лида, если собеседник — лид. Каналы (вещание) исключены.
     """
     types = list(_GROUP_TYPES) if kind == "group" else [ChatType.PRIVATE]
+
+    # Признак «включён режим общения ИИ» для группы = есть привязка чата к
+    # правилу разговорного режима групп.
+    group_rule_id = None
+    if kind == "group":
+        group_rule_id = await db.scalar(select(Rule.id).where(Rule.name == GROUP_CHAT_RULE_NAME))
+    ai_chat_col: Any = (
+        exists(
+            select(RuleChat.rule_id).where(
+                RuleChat.rule_id == group_rule_id, RuleChat.chat_id == Chat.id
+            )
+        )
+        if group_rule_id is not None
+        else literal(False)
+    )
 
     last_msg = (
         select(Message.text, Message.is_incoming)
@@ -266,6 +338,7 @@ async def list_threads(
             msg_count.label("mcount"),
             Lead.score.label("lead_score"),
             Lead.status.label("lead_status"),
+            ai_chat_col.label("ai_chat"),
         )
         # Лид присоединяется только для лички: в группе «лид = чат» смысла нет.
         .outerjoin(
@@ -300,6 +373,7 @@ async def list_threads(
                 awaiting_reply=bool(row.awaiting_reply),
                 lead_score=row.lead_score,
                 lead_status=row.lead_status,
+                ai_chat=bool(row.ai_chat),
             )
         )
     return threads
@@ -399,6 +473,58 @@ async def thread_reply(
         )
     await db.flush()
     return MessageOut.model_validate(message)
+
+
+class AiChatIn(BaseModel):
+    enabled: bool
+
+
+@conversations_router.post(
+    "/{chat_id}/ai-chat", summary="Режим общения ИИ в группе (вкл/выкл)"
+)
+async def toggle_ai_chat(
+    chat_id: uuid.UUID, payload: AiChatIn, _user: OperatorUser, db: DbDep
+) -> dict[str, bool]:
+    """Включает/выключает разговорный режим ИИ для конкретной группы.
+
+    Технически — привязка/отвязка чата к единому правилу «Группа — общение ИИ»
+    (rule_chats). Правило само включается, когда есть хоть один чат, и гаснет,
+    когда последний убрали, — чтобы пустой список не означал «во всех чатах».
+    """
+    chat = await db.get(Chat, chat_id)
+    if chat is None:
+        raise NotFoundError("Чат не найден")
+    if chat.type not in _GROUP_TYPES:
+        raise InvalidInputError("Режим общения ИИ доступен только для групп")
+
+    rule = await _get_group_chat_rule(db, create=payload.enabled)
+    if rule is None:
+        # Выключение, а правила ещё нет — уже выключено.
+        return {"ai_chat": False}
+
+    link_exists = (
+        await db.scalar(
+            select(RuleChat).where(RuleChat.rule_id == rule.id, RuleChat.chat_id == chat.id)
+        )
+    ) is not None
+
+    if payload.enabled and not link_exists:
+        db.add(RuleChat(rule_id=rule.id, chat_id=chat.id))
+        # Групповые сообщения обрабатываются только в отслеживаемых чатах.
+        chat.monitored = True
+    elif not payload.enabled and link_exists:
+        await db.execute(
+            sa_delete(RuleChat).where(RuleChat.rule_id == rule.id, RuleChat.chat_id == chat.id)
+        )
+
+    await db.flush()
+    remaining = await db.scalar(
+        select(func.count()).select_from(RuleChat).where(RuleChat.rule_id == rule.id)
+    )
+    # Правило активно, только пока к нему привязан хотя бы один чат.
+    rule.enabled = bool(remaining)
+    await db.flush()
+    return {"ai_chat": payload.enabled}
 
 
 @leads_router.get("", response_model=list[LeadOut], summary="Лиды")
