@@ -23,8 +23,8 @@ class PersonaOut(BaseModel):
 
 class PersonaUpdate(BaseModel):
     enabled: bool | None = None
-    character: str | None = Field(default=None, max_length=8000)
-    examples: str | None = Field(default=None, max_length=8000)
+    character: str | None = Field(default=None, max_length=20000)
+    examples: str | None = Field(default=None, max_length=20000)
 
 
 async def _get_or_create(db: DbDep) -> Persona:

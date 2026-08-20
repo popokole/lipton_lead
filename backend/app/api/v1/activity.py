@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import Select, and_, func, select
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy import update as sa_update
 
 from app.api.deps import CommandBusDep, CurrentUser, DbDep, OperatorUser, RedisDep
@@ -223,14 +223,18 @@ async def list_threads(
     Превью последней реплики и признак «ждёт ответа» берутся коррелированными
     подзапросами — без отдельного похода за каждым сообщением.
     """
-    # Входящие сохраняются без conversation_id (его проставляют только наши
-    # ответы), поэтому переписку собираем по (аккаунт, tg-чат). В личке
-    # tg_chat_id совпадает с peer_tg_id и у входящих, и у исходящих.
+    # Переписку с человеком собираем шире, чем по одному чату: его сообщения
+    # (в группе-источнике и в личке) — это sender_tg_id == peer, а наши ответы
+    # ему в личку — tg_chat_id == peer. Так тред не теряет ни входящие из
+    # группы, ни развёрнутый ответ в лс.
     last_msg = (
         select(Message.text, Message.is_incoming)
         .where(
             Message.account_id == Conversation.account_id,
-            Message.tg_chat_id == Conversation.peer_tg_id,
+            or_(
+                Message.sender_tg_id == Conversation.peer_tg_id,
+                Message.tg_chat_id == Conversation.peer_tg_id,
+            ),
         )
         .order_by(Message.date.desc())
         .limit(1)
@@ -298,13 +302,17 @@ async def thread_messages(
 
     # Берём последние `limit` сообщений (по убыванию), затем разворачиваем в
     # хронологию — так лента открывается на свежих репликах, а не на первой.
-    # Переписку берём по (аккаунт, tg-чат), а не по conversation_id: входящие
-    # сообщения собеседника сохраняются без него (см. list_threads).
+    # Все сообщения с человеком: его реплики (sender == peer, в т.ч. из
+    # группы-источника) и наши ответы ему в личку (tg_chat_id == peer). Не по
+    # conversation_id — входящие сохраняются без него (см. list_threads).
     rows = await db.scalars(
         select(Message)
         .where(
             Message.account_id == conversation.account_id,
-            Message.tg_chat_id == conversation.peer_tg_id,
+            or_(
+                Message.sender_tg_id == conversation.peer_tg_id,
+                Message.tg_chat_id == conversation.peer_tg_id,
+            ),
         )
         .order_by(Message.date.desc())
         .limit(limit)

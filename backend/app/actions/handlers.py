@@ -86,18 +86,20 @@ class ReplyHandler:
 
         # Личка — «мягкое» действие: её сбой не отменяет ответ в группе,
         # который уже ушёл. Пишем предупреждение и продолжаем.
+        dm_message_id: int | None = None
         if dm_text and request.message.sender_tg_id is not None:
             sender_peer = self.peers.get_sender(
                 request.account_id, request.message.sender_tg_id
             )
             try:
-                await self.sender.send(
+                dm_sent = await self.sender.send(
                     request.account_id,
                     client,
                     chat_id=request.message.sender_tg_id,
                     text=str(dm_text),
                     peer=sender_peer,
                 )
+                dm_message_id = dm_sent.tg_message_id
             except (TelegramFloodWaitError, TelegramError) as exc:
                 detail = getattr(exc, "message", str(exc))
                 logger.warning(
@@ -107,7 +109,7 @@ class ReplyHandler:
                     detail=detail,
                 )
 
-        await self._record_reply(request, sent.tg_message_id)
+        await self._record_reply(request, sent.tg_message_id, dm_message_id=dm_message_id)
         await self.publisher.publish(
             Event(
                 type=EventType.ACTION_SENT,
@@ -128,7 +130,9 @@ class ReplyHandler:
         )
         return ActionResult(status=ActionStatus.SENT, sent_tg_message_id=sent.tg_message_id)
 
-    async def _record_reply(self, request: ActionRequest, tg_message_id: int) -> None:
+    async def _record_reply(
+        self, request: ActionRequest, tg_message_id: int, *, dm_message_id: int | None = None
+    ) -> None:
         from app.models import Message
 
         assert request.message is not None
@@ -151,6 +155,27 @@ class ReplyHandler:
                     rule_id=request.rule_id,
                 )
             )
+            # Ответ в личку (режим «в чат + в личку») уходит в ДРУГОЙ чат —
+            # диалог с автором, а не в группу. Без отдельной записи он не виден
+            # ни в «Общении», ни в истории диалога. tg_chat_id личного диалога
+            # равен tg_id собеседника.
+            dm_text = request.payload.get("dm_text")
+            if dm_message_id is not None and dm_text and request.message.sender_tg_id is not None:
+                db.add(
+                    Message(
+                        account_id=request.account_id,
+                        conversation_id=request.conversation_id,
+                        tg_chat_id=request.message.sender_tg_id,
+                        tg_message_id=dm_message_id,
+                        text=str(dm_text),
+                        date=utcnow(),
+                        is_incoming=False,
+                        is_outgoing=True,
+                        is_bot_reply=True,
+                        processed_status=ProcessedStatus.REPLIED,
+                        rule_id=request.rule_id,
+                    )
+                )
             if request.conversation_id is not None:
                 await ConversationRepository(db).register_reply(request.conversation_id)
             await EventLogRepository(db).add(
