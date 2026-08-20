@@ -223,9 +223,15 @@ async def list_threads(
     Превью последней реплики и признак «ждёт ответа» берутся коррелированными
     подзапросами — без отдельного похода за каждым сообщением.
     """
+    # Входящие сохраняются без conversation_id (его проставляют только наши
+    # ответы), поэтому переписку собираем по (аккаунт, tg-чат). В личке
+    # tg_chat_id совпадает с peer_tg_id и у входящих, и у исходящих.
     last_msg = (
         select(Message.text, Message.is_incoming)
-        .where(Message.conversation_id == Conversation.id)
+        .where(
+            Message.account_id == Conversation.account_id,
+            Message.tg_chat_id == Conversation.peer_tg_id,
+        )
         .order_by(Message.date.desc())
         .limit(1)
         .correlate(Conversation)
@@ -292,9 +298,14 @@ async def thread_messages(
 
     # Берём последние `limit` сообщений (по убыванию), затем разворачиваем в
     # хронологию — так лента открывается на свежих репликах, а не на первой.
+    # Переписку берём по (аккаунт, tg-чат), а не по conversation_id: входящие
+    # сообщения собеседника сохраняются без него (см. list_threads).
     rows = await db.scalars(
         select(Message)
-        .where(Message.conversation_id == conversation_id)
+        .where(
+            Message.account_id == conversation.account_id,
+            Message.tg_chat_id == conversation.peer_tg_id,
+        )
         .order_by(Message.date.desc())
         .limit(limit)
     )
