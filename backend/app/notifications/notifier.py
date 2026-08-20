@@ -93,6 +93,23 @@ class NotifierBot:
                         renamed += 1
                     except NotifyError:
                         pass  # топик мог быть удалён вручную — не критично
+
+        # Два постоянных топика-ленты: все ответы в личке и все в группах.
+        row = await db.get(NotifySettings, SINGLETON_ID)
+        if row is not None:
+            if row.dm_topic_id is None:
+                topic = await self._call(
+                    token, "createForumTopic", chat_id=group_id, name="Общение ИИ · личка"
+                )
+                row.dm_topic_id = int(topic["message_thread_id"])
+                created += 1
+            if row.group_topic_id is None:
+                topic = await self._call(
+                    token, "createForumTopic", chat_id=group_id, name="Общение ИИ · группы"
+                )
+                row.group_topic_id = int(topic["message_thread_id"])
+                created += 1
+
         await db.flush()
         return {
             "is_forum": True,
@@ -101,6 +118,44 @@ class NotifierBot:
             "existing": existing,
             "renamed": renamed,
         }
+
+    async def notify_stream(self, db: AsyncSession, *, is_private: bool, text: str) -> None:
+        """Шлёт ответ в постоянный топик-ленту: личка или группы.
+
+        Отдельно от notify_lead (топик сценария): здесь копятся ВСЕ наши
+        ответы двумя лентами. Топик создаётся лениво при первом обращении.
+        Никогда не поднимает исключение — уведомление вторично.
+        """
+        try:
+            settings = await self._load_settings(db)
+            if settings is None:
+                return
+            token, group_id = settings
+            row = await db.get(NotifySettings, SINGLETON_ID)
+            if row is None:
+                return
+            field = "dm_topic_id" if is_private else "group_topic_id"
+            thread_id = getattr(row, field)
+            if thread_id is None:
+                name = "Общение ИИ · личка" if is_private else "Общение ИИ · группы"
+                topic = await self._call(
+                    token, "createForumTopic", chat_id=group_id, name=name
+                )
+                thread_id = int(topic["message_thread_id"])
+                setattr(row, field, thread_id)
+                await db.flush()
+            await self._call(
+                token,
+                "sendMessage",
+                chat_id=group_id,
+                message_thread_id=thread_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — уведомление не критично
+            logger.warning("notify_stream_failed", detail=str(exc)[:200])
+            await self._record_error(db, str(exc)[:300])
 
     async def notify_lead(
         self,

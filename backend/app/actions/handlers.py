@@ -260,6 +260,13 @@ class ReplyHandler:
                         scenario_name=scenario_name,
                         text=card,
                     )
+                    # Две общие ленты: все ответы в личке и все в группах.
+                    # Классифицируем по источнику — где пришло сообщение.
+                    await self.notifier.notify_stream(
+                        db,
+                        is_private=request.message.is_private,
+                        text=card,
+                    )
 
 
 @dataclass

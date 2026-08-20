@@ -38,5 +38,10 @@ class NotifySettings(TimestampMixin, Base):
     # id форум-группы, куда бот шлёт (с включёнными топиками).
     group_id: Mapped[int | None] = mapped_column(TelegramId)
 
+    # Два постоянных топика-ленты: все наши ответы в личке и все в группах.
+    # Создаются лениво (как топики сценариев) и запоминаются здесь.
+    dm_topic_id: Mapped[int | None] = mapped_column(TelegramId)
+    group_topic_id: Mapped[int | None] = mapped_column(TelegramId)
+
     bot_username: Mapped[str | None] = mapped_column(sa.String(64))
     last_error: Mapped[str | None] = mapped_column(sa.Text)
