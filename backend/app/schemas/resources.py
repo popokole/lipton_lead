@@ -369,21 +369,28 @@ class LeadOut(ORMModel):
 
 
 class ThreadOut(BaseModel):
-    """Строка списка «Общение»: диалог с лидом плюс превью последней реплики."""
+    """Строка списка «Общение»: один чат (личка или группа) с превью реплики.
 
-    conversation_id: uuid.UUID
+    Тред привязан к чату, а не к человеку: личные диалоги и группы не
+    смешиваются. Для личек, где собеседник — лид, добавляются балл и статус.
+    """
+
+    chat_id: uuid.UUID
     account_id: uuid.UUID
-    peer_tg_id: int
+    tg_chat_id: int
+    # 'dm' — личный диалог, 'group' — группа/супергруппа.
+    kind: str
+    title: str | None
     username: str | None
-    display_name: str | None
-    status: ConversationStatus
-    lead_score: int
-    lead_status: LeadStatus
+    has_avatar: bool
+    monitored: bool
     message_count: int
     last_message_at: datetime | None
     last_text: str | None
     # Последнее сообщение — входящее: значит ждёт нашего ответа.
     awaiting_reply: bool
+    lead_score: int | None = None
+    lead_status: LeadStatus | None = None
 
 
 # --- воркеры и сводка ------------------------------------------------------

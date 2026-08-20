@@ -17,11 +17,13 @@ from app.bus.messages import Event, EventType
 from app.core.clock import utcnow
 from app.core.errors import TelegramError, TelegramFloodWaitError
 from app.core.logging import get_logger
+from app.database.repositories.chats import ChatRepository
 from app.database.repositories.conversations import ConversationRepository, LeadRepository
 from app.database.repositories.events import EventLogRepository
 from app.database.session import Database
 from app.models import (
     ActionStatus,
+    ChatType,
     ConversationStatus,
     Notification,
     NotificationType,
@@ -156,14 +158,28 @@ class ReplyHandler:
                 )
             )
             # Ответ в личку (режим «в чат + в личку») уходит в ДРУГОЙ чат —
-            # диалог с автором, а не в группу. Без отдельной записи он не виден
-            # ни в «Общении», ни в истории диалога. tg_chat_id личного диалога
-            # равен tg_id собеседника.
+            # диалог с автором, а не в группу. Заводим/находим личный чат и
+            # привязываем к нему запись: иначе ответ не виден в «Общении» (там
+            # тред строится по chat_id) и не попадает в историю диалога.
+            # tg_chat_id личного диалога равен tg_id собеседника.
             dm_text = request.payload.get("dm_text")
             if dm_message_id is not None and dm_text and request.message.sender_tg_id is not None:
+                dm_chat = await ChatRepository(db).ensure(
+                    request.account_id,
+                    request.message.sender_tg_id,
+                    chat_type=ChatType.PRIVATE,
+                    title=request.message.sender_display_name
+                    or (
+                        f"@{request.message.sender_username}"
+                        if request.message.sender_username
+                        else None
+                    ),
+                    username=request.message.sender_username,
+                )
                 db.add(
                     Message(
                         account_id=request.account_id,
+                        chat_id=dm_chat.id,
                         conversation_id=request.conversation_id,
                         tg_chat_id=request.message.sender_tg_id,
                         tg_message_id=dm_message_id,
@@ -176,6 +192,7 @@ class ReplyHandler:
                         rule_id=request.rule_id,
                     )
                 )
+                await ChatRepository(db).touch(dm_chat.id)
             if request.conversation_id is not None:
                 await ConversationRepository(db).register_reply(request.conversation_id)
             await EventLogRepository(db).add(

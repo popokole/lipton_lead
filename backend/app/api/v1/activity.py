@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import Select, and_, func, or_, select
+from sqlalchemy import Select, and_, exists, func, select
 from sqlalchemy import update as sa_update
 
 from app.api.deps import CommandBusDep, CurrentUser, DbDep, OperatorUser, RedisDep
@@ -23,6 +23,7 @@ from app.models import (
     Action,
     ActionStatus,
     Chat,
+    ChatType,
     Conversation,
     ConversationStatus,
     EventLog,
@@ -209,111 +210,109 @@ async def list_conversations(
     return [ConversationOut.model_validate(row) for row in rows.all()]
 
 
+_GROUP_TYPES = (ChatType.GROUP, ChatType.SUPERGROUP)
+
+
 @conversations_router.get("/threads", response_model=list[ThreadOut], summary="Треды общения")
 async def list_threads(
     _user: CurrentUser,
     db: DbDep,
+    kind: str = Query(default="dm", pattern="^(dm|group)$"),
     account_id: uuid.UUID | None = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=300),
+    limit: int = Query(default=200, ge=1, le=500),
 ) -> list[ThreadOut]:
-    """Список диалогов, у которых есть лид: с кем реально общаемся.
+    """Треды общения по ЧАТАМ: отдельно личка (kind=dm), отдельно группы.
 
-    Общение имеет смысл только там, где есть лид (кому мы хоть раз ответили),
-    поэтому список строится join'ом диалога к лиду по (аккаунт, tg_id).
-    Превью последней реплики и признак «ждёт ответа» берутся коррелированными
-    подзапросами — без отдельного похода за каждым сообщением.
+    Тред привязан к чату, а не к человеку, поэтому сообщения из группы и из
+    лички не смешиваются. Показываем только чаты, где есть сообщения. Для лички
+    подтягиваем балл лида, если собеседник — лид. Каналы (вещание) исключены.
     """
-    # Переписку с человеком собираем шире, чем по одному чату: его сообщения
-    # (в группе-источнике и в личке) — это sender_tg_id == peer, а наши ответы
-    # ему в личку — tg_chat_id == peer. Так тред не теряет ни входящие из
-    # группы, ни развёрнутый ответ в лс.
+    types = list(_GROUP_TYPES) if kind == "group" else [ChatType.PRIVATE]
+
     last_msg = (
         select(Message.text, Message.is_incoming)
-        .where(
-            Message.account_id == Conversation.account_id,
-            or_(
-                Message.sender_tg_id == Conversation.peer_tg_id,
-                Message.tg_chat_id == Conversation.peer_tg_id,
-            ),
-        )
+        .where(Message.chat_id == Chat.id)
         .order_by(Message.date.desc())
         .limit(1)
-        .correlate(Conversation)
+        .correlate(Chat)
     )
     last_text = last_msg.with_only_columns(Message.text).scalar_subquery()
     last_incoming = last_msg.with_only_columns(Message.is_incoming).scalar_subquery()
+    msg_count = (
+        select(func.count())
+        .select_from(Message)
+        .where(Message.chat_id == Chat.id)
+        .correlate(Chat)
+        .scalar_subquery()
+    )
+    has_messages = exists(select(Message.id).where(Message.chat_id == Chat.id))
 
     stmt = (
         select(
-            Conversation,
-            Lead.username,
-            Lead.display_name,
-            Lead.score.label("lead_score"),
-            Lead.status.label("lead_status"),
+            Chat,
             last_text.label("last_text"),
             func.coalesce(last_incoming, False).label("awaiting_reply"),
+            msg_count.label("mcount"),
+            Lead.score.label("lead_score"),
+            Lead.status.label("lead_status"),
         )
-        .join(
+        # Лид присоединяется только для лички: в группе «лид = чат» смысла нет.
+        .outerjoin(
             Lead,
             and_(
-                Lead.account_id == Conversation.account_id,
-                Lead.tg_user_id == Conversation.peer_tg_id,
+                Chat.type == ChatType.PRIVATE,
+                Lead.account_id == Chat.account_id,
+                Lead.tg_user_id == Chat.tg_chat_id,
             ),
         )
-        .order_by(Conversation.last_message_at.desc().nullslast())
+        .where(Chat.type.in_(types), has_messages)
+        .order_by(Chat.last_message_at.desc().nullslast())
     )
     if account_id is not None:
-        stmt = stmt.where(Conversation.account_id == account_id)
+        stmt = stmt.where(Chat.account_id == account_id)
 
     threads: list[ThreadOut] = []
     for row in (await db.execute(stmt.limit(limit))).all():
-        conversation = row[0]
+        chat = row[0]
         threads.append(
             ThreadOut(
-                conversation_id=conversation.id,
-                account_id=conversation.account_id,
-                peer_tg_id=conversation.peer_tg_id,
-                username=row.username,
-                display_name=row.display_name,
-                status=conversation.status,
-                lead_score=row.lead_score,
-                lead_status=row.lead_status,
-                message_count=conversation.message_count,
-                last_message_at=conversation.last_message_at,
+                chat_id=chat.id,
+                account_id=chat.account_id,
+                tg_chat_id=chat.tg_chat_id,
+                kind="dm" if chat.type is ChatType.PRIVATE else "group",
+                title=chat.title,
+                username=chat.username,
+                has_avatar=chat.avatar is not None,
+                monitored=chat.monitored,
+                message_count=int(row.mcount or 0),
+                last_message_at=chat.last_message_at,
                 last_text=row.last_text,
                 awaiting_reply=bool(row.awaiting_reply),
+                lead_score=row.lead_score,
+                lead_status=row.lead_status,
             )
         )
     return threads
 
 
 @conversations_router.get(
-    "/{conversation_id}/messages", response_model=list[MessageOut], summary="Переписка диалога"
+    "/{chat_id}/messages", response_model=list[MessageOut], summary="Переписка чата"
 )
 async def thread_messages(
-    conversation_id: uuid.UUID,
+    chat_id: uuid.UUID,
     _user: CurrentUser,
     db: DbDep,
     limit: int = Query(default=200, ge=1, le=500),
 ) -> list[MessageOut]:
-    conversation = await db.get(Conversation, conversation_id)
-    if conversation is None:
-        raise NotFoundError("Диалог не найден")
+    chat = await db.get(Chat, chat_id)
+    if chat is None:
+        raise NotFoundError("Чат не найден")
 
-    # Берём последние `limit` сообщений (по убыванию), затем разворачиваем в
-    # хронологию — так лента открывается на свежих репликах, а не на первой.
-    # Все сообщения с человеком: его реплики (sender == peer, в т.ч. из
-    # группы-источника) и наши ответы ему в личку (tg_chat_id == peer). Не по
-    # conversation_id — входящие сохраняются без него (см. list_threads).
+    # Сообщения строго одного чата — личка и группы не смешиваются. Берём
+    # последние `limit` (по убыванию) и разворачиваем в хронологию.
     rows = await db.scalars(
         select(Message)
-        .where(
-            Message.account_id == conversation.account_id,
-            or_(
-                Message.sender_tg_id == conversation.peer_tg_id,
-                Message.tg_chat_id == conversation.peer_tg_id,
-            ),
-        )
+        .where(Message.chat_id == chat_id)
         .order_by(Message.date.desc())
         .limit(limit)
     )
@@ -328,29 +327,26 @@ class ThreadReplyIn(BaseModel):
 
 
 @conversations_router.post(
-    "/{conversation_id}/reply", response_model=MessageOut, summary="Ответить в диалоге"
+    "/{chat_id}/reply", response_model=MessageOut, summary="Ответить в чат"
 )
 async def thread_reply(
-    conversation_id: uuid.UUID,
+    chat_id: uuid.UUID,
     payload: ThreadReplyIn,
     _user: OperatorUser,
     bus: CommandBusDep,
     db: DbDep,
 ) -> MessageOut:
-    """Оператор пишет собеседнику вручную от имени аккаунта.
+    """Оператор пишет в чат вручную от имени аккаунта (личка или группа).
 
     Отправку выполняет воркер-владелец аккаунта (единственный держатель
     TelegramClient). Отправленное помечаем `is_bot_reply=True`, чтобы конвейер
     не принял его за входящее и аккаунт не начал отвечать сам себе.
     """
-    conversation = await db.get(Conversation, conversation_id)
-    if conversation is None:
-        raise NotFoundError("Диалог не найден")
+    chat = await db.get(Chat, chat_id)
+    if chat is None:
+        raise NotFoundError("Чат не найден")
 
-    command_payload: dict[str, Any] = {
-        "chat_id": conversation.peer_tg_id,
-        "text": payload.text,
-    }
+    command_payload: dict[str, Any] = {"chat_id": chat.tg_chat_id, "text": payload.text}
     if payload.reply_to is not None:
         command_payload["reply_to"] = payload.reply_to
 
@@ -358,7 +354,7 @@ async def thread_reply(
         result = await bus.call(
             Command(
                 type=CommandType.SEND_MESSAGE,
-                account_id=conversation.account_id,
+                account_id=chat.account_id,
                 payload=command_payload,
             ),
             timeout_seconds=60,
@@ -370,10 +366,9 @@ async def thread_reply(
 
     now = utcnow()
     message = Message(
-        account_id=conversation.account_id,
-        chat_id=conversation.chat_id,
-        conversation_id=conversation.id,
-        tg_chat_id=conversation.peer_tg_id,
+        account_id=chat.account_id,
+        chat_id=chat.id,
+        tg_chat_id=chat.tg_chat_id,
         tg_message_id=int(result.data["tg_message_id"]),
         text=payload.text,
         date=now,
@@ -384,19 +379,14 @@ async def thread_reply(
         processed_status=ProcessedStatus.REPLIED,
     )
     db.add(message)
-    # Ручной ответ не должен раздувать счётчик петли ai_replies_in_row —
-    # обновляем только активность диалога и время последнего ответа.
-    conversation.message_count += 1
-    conversation.last_message_at = now
-    conversation.last_reply_at = now
-    await db.execute(
-        sa_update(Lead)
-        .where(
-            Lead.account_id == conversation.account_id,
-            Lead.tg_user_id == conversation.peer_tg_id,
+    chat.last_message_at = now
+    # В личке собеседник — лид: отмечаем активность.
+    if chat.type is ChatType.PRIVATE:
+        await db.execute(
+            sa_update(Lead)
+            .where(Lead.account_id == chat.account_id, Lead.tg_user_id == chat.tg_chat_id)
+            .values(last_seen_at=now)
         )
-        .values(last_seen_at=now)
-    )
     await db.flush()
     return MessageOut.model_validate(message)
 

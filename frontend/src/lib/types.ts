@@ -194,18 +194,20 @@ export interface Lead {
 }
 
 export interface Thread {
-  conversation_id: string;
+  chat_id: string;
   account_id: string;
-  peer_tg_id: number;
+  tg_chat_id: number;
+  kind: 'dm' | 'group';
+  title: string | null;
   username: string | null;
-  display_name: string | null;
-  status: string;
-  lead_score: number;
-  lead_status: string;
+  has_avatar: boolean;
+  monitored: boolean;
   message_count: number;
   last_message_at: string | null;
   last_text: string | null;
   awaiting_reply: boolean;
+  lead_score: number | null;
+  lead_status: string | null;
 }
 
 export interface Conversation {

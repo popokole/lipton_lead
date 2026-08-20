@@ -3,74 +3,124 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { Shell } from '@/components/shell';
-import { Badge, Button, Empty, ErrorText, PageHeader, inputClass, statusTone } from '@/components/ui';
+import {
+  Badge,
+  Button,
+  ChatAvatar,
+  Empty,
+  ErrorText,
+  PageHeader,
+  inputClass,
+} from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 import { useApi } from '@/lib/hooks';
 import type { Message, Thread } from '@/lib/types';
 
-function peerName(thread: Thread): string {
+type Kind = 'dm' | 'group';
+
+function threadName(thread: Thread): string {
   return (
-    thread.display_name ||
+    thread.title ||
     (thread.username ? `@${thread.username}` : null) ||
-    `id ${thread.peer_tg_id}`
+    (thread.kind === 'dm' ? `id ${thread.tg_chat_id}` : `чат ${thread.tg_chat_id}`)
   );
 }
 
 /**
- * «Общение» — двухпанельный инбокс.
+ * «Общение» — инбокс по ЧАТАМ.
  *
- * Список слева — только диалоги, у которых есть лид (с кем реально общаемся).
- * Справа — переписка в личке и поле для ручного ответа от имени аккаунта.
+ * Личка и группы разделены вкладками и никогда не смешиваются: тред привязан к
+ * чату, а не к человеку. Справа — переписка выбранного чата и ручной ответ от
+ * имени аккаунта.
  */
 export default function InboxPage() {
-  const threads = useApi<Thread[]>('/conversations/threads?limit=200', 8_000);
+  const [kind, setKind] = useState<Kind>('dm');
+  const threads = useApi<Thread[]>(`/conversations/threads?kind=${kind}&limit=300`, 8_000);
   const [selected, setSelected] = useState<string | null>(null);
 
-  // При первой загрузке открываем самый свежий тред.
+  // При смене вкладки сбрасываем выбор — id чата из другой категории не подходит.
+  useEffect(() => {
+    setSelected(null);
+  }, [kind]);
+
+  // Открываем самый свежий тред текущей вкладки.
   useEffect(() => {
     if (selected === null && threads.data && threads.data.length > 0) {
-      setSelected(threads.data[0].conversation_id);
+      setSelected(threads.data[0].chat_id);
     }
   }, [threads.data, selected]);
 
-  const active = threads.data?.find((thread) => thread.conversation_id === selected) ?? null;
+  const active = threads.data?.find((thread) => thread.chat_id === selected) ?? null;
 
   return (
     <Shell>
       <PageHeader
         title="Общение"
-        subtitle="Диалоги с лидами: переписка в личке и ручной ответ от имени аккаунта"
+        subtitle="Личные диалоги и группы — раздельно. Переписка и ручной ответ от имени аккаунта"
       />
+
+      <div className="mb-4 inline-flex rounded-lg border border-ink-800 bg-ink-900/40 p-1 text-sm">
+        <button
+          onClick={() => setKind('dm')}
+          className={`rounded-md px-4 py-1.5 transition ${
+            kind === 'dm' ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          Личка
+        </button>
+        <button
+          onClick={() => setKind('group')}
+          className={`rounded-md px-4 py-1.5 transition ${
+            kind === 'group' ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          Группы
+        </button>
+      </div>
+
       <ErrorText>{threads.error}</ErrorText>
 
-      <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
-        <div className="max-h-[72vh] overflow-y-auto rounded-xl border border-ink-800 bg-ink-900/40">
+      <div className="grid gap-4 lg:grid-cols-[340px_1fr]">
+        <div className="max-h-[70vh] overflow-y-auto rounded-xl border border-ink-800 bg-ink-900/40">
           {(threads.data?.length ?? 0) === 0 ? (
             <div className="p-4">
-              <Empty>Пока не с кем общаться — лиды появятся после первых ответов</Empty>
+              <Empty>
+                {kind === 'dm' ? 'Личных диалогов пока нет' : 'Групп с перепиской пока нет'}
+              </Empty>
             </div>
           ) : (
             <ul className="divide-y divide-ink-800/70">
               {threads.data?.map((thread) => {
-                const on = thread.conversation_id === selected;
+                const on = thread.chat_id === selected;
                 return (
-                  <li key={thread.conversation_id}>
+                  <li key={thread.chat_id}>
                     <button
-                      onClick={() => setSelected(thread.conversation_id)}
-                      className={`block w-full px-4 py-3 text-left transition ${
+                      onClick={() => setSelected(thread.chat_id)}
+                      className={`flex w-full items-center gap-3 px-3 py-3 text-left transition ${
                         on ? 'bg-accent-soft' : 'hover:bg-ink-800/60'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-sm font-medium text-slate-100">
-                          {peerName(thread)}
-                        </span>
-                        {thread.awaiting_reply && (
-                          <span className="h-2 w-2 shrink-0 rounded-full bg-accent" title="Ждёт ответа" />
-                        )}
-                      </div>
-                      <div className="mt-0.5 truncate text-xs text-slate-500">
-                        {thread.last_text ?? '—'}
+                      <ChatAvatar
+                        chatId={thread.chat_id}
+                        title={threadName(thread)}
+                        hasAvatar={thread.has_avatar}
+                        size={36}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate text-sm font-medium text-slate-100">
+                            {threadName(thread)}
+                          </span>
+                          {thread.awaiting_reply && (
+                            <span
+                              className="h-2 w-2 shrink-0 rounded-full bg-accent"
+                              title="Ждёт ответа"
+                            />
+                          )}
+                        </div>
+                        <div className="mt-0.5 truncate text-xs text-slate-500">
+                          {thread.last_text ?? '—'}
+                        </div>
                       </div>
                     </button>
                   </li>
@@ -81,10 +131,10 @@ export default function InboxPage() {
         </div>
 
         {active ? (
-          <ThreadView key={active.conversation_id} thread={active} onSent={threads.reload} />
+          <ThreadView key={active.chat_id} thread={active} onSent={threads.reload} />
         ) : (
           <div className="flex min-h-[40vh] items-center justify-center rounded-xl border border-ink-800 bg-ink-900/40">
-            <Empty>Выберите диалог слева</Empty>
+            <Empty>Выберите чат слева</Empty>
           </div>
         )}
       </div>
@@ -93,13 +143,12 @@ export default function InboxPage() {
 }
 
 function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) {
-  const messages = useApi<Message[]>(`/conversations/${thread.conversation_id}/messages`, 5_000);
+  const messages = useApi<Message[]>(`/conversations/${thread.chat_id}/messages`, 5_000);
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  // Прокручиваем к последней реплике при обновлении ленты.
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [messages.data]);
@@ -110,7 +159,7 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
     setSending(true);
     setError(null);
     try {
-      await api.post<Message>(`/conversations/${thread.conversation_id}/reply`, { text: body });
+      await api.post<Message>(`/conversations/${thread.chat_id}/reply`, { text: body });
       setText('');
       await messages.reload();
       onSent();
@@ -122,22 +171,31 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
   };
 
   return (
-    <div className="flex max-h-[72vh] flex-col rounded-xl border border-ink-800 bg-ink-900/40">
+    <div className="flex max-h-[70vh] flex-col rounded-xl border border-ink-800 bg-ink-900/40">
       <div className="flex items-center justify-between gap-3 border-b border-ink-800 px-4 py-3">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium text-slate-100">{peerName(thread)}</div>
-          <div className="text-xs text-slate-500">
-            {thread.username ? `@${thread.username} · ` : ''}
-            {thread.message_count} сообщений
+        <div className="flex min-w-0 items-center gap-3">
+          <ChatAvatar
+            chatId={thread.chat_id}
+            title={threadName(thread)}
+            hasAvatar={thread.has_avatar}
+            size={36}
+          />
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-slate-100">{threadName(thread)}</div>
+            <div className="text-xs text-slate-500">
+              {thread.kind === 'dm' ? 'личный диалог' : 'группа'} · {thread.message_count} сообщений
+            </div>
           </div>
         </div>
-        <Badge tone={statusTone(thread.status)}>{thread.status}</Badge>
+        {thread.kind === 'dm' && thread.lead_score != null && (
+          <Badge tone="info">лид {thread.lead_score}</Badge>
+        )}
       </div>
 
       <div className="flex-1 space-y-2 overflow-y-auto px-4 py-4">
         <ErrorText>{messages.error}</ErrorText>
         {(messages.data?.length ?? 0) === 0 ? (
-          <Empty>В этом диалоге пока нет сохранённых сообщений</Empty>
+          <Empty>В этом чате пока нет сохранённых сообщений</Empty>
         ) : (
           messages.data?.map((message) => {
             const mine = !message.is_incoming;
@@ -150,10 +208,15 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
                       : 'rounded-bl-sm bg-ink-800 text-slate-200'
                   }`}
                 >
+                  {thread.kind === 'group' && message.is_incoming && message.sender_display_name && (
+                    <div className="mb-0.5 text-[11px] font-medium text-accent">
+                      {message.sender_display_name}
+                    </div>
+                  )}
                   <div className="whitespace-pre-wrap break-words">{message.text ?? '—'}</div>
                   <div className={`mt-1 text-[10px] ${mine ? 'text-white/60' : 'text-slate-500'}`}>
                     {new Date(message.date).toLocaleString('ru')}
-                    {mine && message.is_bot_reply ? ' · авто' : ''}
+                    {mine && message.is_bot_reply ? ' · ии' : ''}
                   </div>
                 </div>
               </div>
