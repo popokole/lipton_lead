@@ -17,6 +17,11 @@ class Scenario(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(sa.String(120), nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(sa.Text)
     system_prompt: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    # Критерий отбора лида для анализатора: что считать НАСТОЯЩИМ запросом по
+    # этой услуге, а что нет. Отдельно от system_prompt (тот — персона для
+    # генерации): по нему анализатор решает «отвечать или нет», без лишней
+    # лояльности генеративного промпта. Пусто — анализатор берёт system_prompt.
+    lead_criteria: Mapped[str | None] = mapped_column(sa.Text)
 
     model: Mapped[str | None] = mapped_column(sa.String(120))
     temperature: Mapped[float | None] = mapped_column(sa.Numeric(3, 2))

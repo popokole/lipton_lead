@@ -134,8 +134,13 @@ class ReplyPipeline:
                 )
 
             scenario = await self._load_scenario(rule.scenario_id)
+            # Для анализа берём критерий лида, а не генеративную персону: персона
+            # слишком лояльна и даёт ложные срабатывания (шутки, «не мне» и т.п.).
+            analysis_task = (
+                (scenario.lead_criteria or scenario.system_prompt) if scenario else rule.name
+            )
             analysis = await self._analyzer.analyze(
-                system_prompt=scenario.system_prompt if scenario else rule.name,
+                system_prompt=analysis_task,
                 message_text=message.text,
                 threshold=rule.ai_threshold or 0.0,
                 rule_name=rule.name,

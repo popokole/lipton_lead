@@ -183,6 +183,7 @@ class ScenarioOut(ORMModel):
     name: str
     description: str | None
     system_prompt: str
+    lead_criteria: str | None
     model: str | None
     temperature: float | None
     max_tokens: int | None
@@ -203,6 +204,7 @@ class ScenarioOut(ORMModel):
 class ScenarioCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     system_prompt: str = Field(min_length=1)
+    lead_criteria: str | None = Field(default=None, max_length=4000)
     description: str | None = None
     model: str | None = Field(default=None, max_length=120)
     temperature: float | None = Field(default=None, ge=0, le=2)
