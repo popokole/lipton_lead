@@ -389,7 +389,9 @@ def format_lead_card(
     )
 
 
-def message_link(tg_chat_id: int | None, message_id: int | None, username: str | None) -> str | None:
+def message_link(
+    tg_chat_id: int | None, message_id: int | None, username: str | None
+) -> str | None:
     """Ссылка на сообщение в Telegram, если её вообще можно построить.
 
     Публичный чат — по username; приватный супергруппа/канал (-100…) — через
