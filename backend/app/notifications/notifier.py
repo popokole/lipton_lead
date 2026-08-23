@@ -386,9 +386,8 @@ def format_lead_card(
 
 def format_review_card(review: Any) -> str:
     """Карточка сомнительного ответа: что пришло, что предлагаем ответить."""
-    who = review.sender_display_name or (
-        f"@{review.sender_username}" if review.sender_username else str(review.target_sender_tg_id or "?")
-    )
+    handle = f"@{review.sender_username}" if review.sender_username else None
+    who = review.sender_display_name or handle or str(review.target_sender_tg_id or "?")
     conf = f"{float(review.confidence):.2f}" if review.confidence is not None else "?"
     parts = [
         f"🟡 <b>Сомнительный лид</b> · уверенность {conf}",

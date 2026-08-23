@@ -275,7 +275,7 @@ class ReviewHandler:
 
     database: Database
     publisher: EventPublisher
-    notifier: "NotifierBot | None" = None
+    notifier: NotifierBot | None = None
 
     async def execute(self, request: ActionRequest, action_id: uuid.UUID) -> ActionResult:
         if not request.reply_text or request.message is None:
