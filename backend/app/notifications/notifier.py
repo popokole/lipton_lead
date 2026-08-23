@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import EncryptedBlob, SecretBox
 from app.core.logging import get_logger
-from app.models import Scenario
+from app.models import Chat, Scenario
 from app.models.notify import SINGLETON_ID, NotifySettings
 
 logger = get_logger(__name__)
@@ -226,12 +226,17 @@ class NotifierBot:
                     ]
                 ]
             }
+            chat = await db.get(Chat, review.chat_id) if review.chat_id else None
             result = await self._call(
                 token,
                 "sendMessage",
                 chat_id=group_id,
                 message_thread_id=thread_id,
-                text=format_review_card(review),
+                text=format_review_card(
+                    review,
+                    chat_title=chat.title if chat else None,
+                    chat_username=chat.username if chat else None,
+                ),
                 parse_mode="HTML",
                 disable_web_page_preview=True,
                 reply_markup=keyboard,
@@ -384,14 +389,38 @@ def format_lead_card(
     )
 
 
-def format_review_card(review: Any) -> str:
-    """Карточка сомнительного ответа: что пришло, что предлагаем ответить."""
+def message_link(tg_chat_id: int | None, message_id: int | None, username: str | None) -> str | None:
+    """Ссылка на сообщение в Telegram, если её вообще можно построить.
+
+    Публичный чат — по username; приватный супергруппа/канал (-100…) — через
+    /c/. Для лички и обычных групп прямой ссылки на сообщение нет.
+    """
+    if not tg_chat_id or not message_id:
+        return None
+    if username:
+        return f"https://t.me/{username}/{message_id}"
+    cid = str(tg_chat_id)
+    if cid.startswith("-100"):
+        return f"https://t.me/c/{cid[4:]}/{message_id}"
+    return None
+
+
+def format_review_card(
+    review: Any, *, chat_title: str | None = None, chat_username: str | None = None
+) -> str:
+    """Карточка сомнительного ответа: откуда, что пришло, что предлагаем ответить."""
     handle = f"@{review.sender_username}" if review.sender_username else None
     who = review.sender_display_name or handle or str(review.target_sender_tg_id or "?")
     conf = f"{float(review.confidence):.2f}" if review.confidence is not None else "?"
+    where = chat_title or (f"@{chat_username}" if chat_username else "личка")
+    link = message_link(review.tg_chat_id, review.reply_to_tg_message_id, chat_username)
+    where_line = f"💬 из: {_esc(where)}"
+    if link:
+        where_line += f' · <a href="{link}">открыть сообщение</a>'
     parts = [
         f"🟡 <b>Сомнительный лид</b> · уверенность {conf}",
         f"👤 {_esc(who)}",
+        where_line,
         f"\n<b>Сообщение:</b>\n{_esc((review.incoming_text or '')[:400])}",
         f"\n<b>Предлагаю ответить:</b>\n{_esc((review.dm_text or review.reply_text or '')[:500])}",
     ]
