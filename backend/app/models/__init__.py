@@ -39,6 +39,7 @@ from app.models.message import Message, ProcessedMessage
 from app.models.notify import NotifySettings
 from app.models.observability import AIRequest, AuditLog, EventLog, Notification, Worker
 from app.models.persona import Persona
+from app.models.review import PendingReview
 from app.models.rule import Rule, RuleAccount, RuleChat
 from app.models.scenario import Scenario
 from app.models.user import User
@@ -72,6 +73,7 @@ __all__ = [
     "NotificationType",
     "NotifySettings",
     "Persona",
+    "PendingReview",
     "ProcessedMessage",
     "ProcessedStatus",
     "Proxy",

@@ -270,6 +270,54 @@ class ReplyHandler:
 
 
 @dataclass
+class ReviewHandler:
+    """Кладёт сомнительный ответ на подтверждение оператору (кнопки в лог-чате)."""
+
+    database: Database
+    publisher: EventPublisher
+    notifier: "NotifierBot | None" = None
+
+    async def execute(self, request: ActionRequest, action_id: uuid.UUID) -> ActionResult:
+        if not request.reply_text or request.message is None:
+            return ActionResult(status=ActionStatus.REJECTED, detail="нечего подтверждать")
+        from app.models import PendingReview
+
+        async with self.database.session() as db:
+            confidence = request.payload.get("confidence")
+            review = PendingReview(
+                account_id=request.account_id,
+                scenario_id=request.scenario_id,
+                rule_id=request.rule_id,
+                chat_id=request.chat_id,
+                tg_chat_id=request.message.tg_chat_id,
+                reply_to_tg_message_id=request.message.tg_message_id,
+                target_sender_tg_id=request.message.sender_tg_id,
+                reply_text=request.reply_text,
+                dm_text=request.payload.get("dm_text"),
+                incoming_text=request.message.text,
+                sender_username=request.message.sender_username,
+                sender_display_name=request.message.sender_display_name,
+                confidence=float(confidence) if confidence is not None else None,
+                status="pending",
+            )
+            db.add(review)
+            await db.flush()
+            if self.notifier is not None:
+                await self.notifier.send_review(db, review)
+            await EventLogRepository(db).add(
+                LogEventType.HUMAN_HANDOFF,
+                account_id=request.account_id,
+                chat_id=request.chat_id,
+                message_id=request.message_id,
+                rule_id=request.rule_id,
+                scenario_id=request.scenario_id,
+                status="REVIEW",
+                extra={"confidence": confidence},
+            )
+        return ActionResult(status=ActionStatus.SENT, detail="на подтверждении")
+
+
+@dataclass
 class NotifyAdminHandler:
     """Кладёт уведомление операторам панели."""
 

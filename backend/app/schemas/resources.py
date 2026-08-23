@@ -198,6 +198,8 @@ class ScenarioOut(ORMModel):
     reply_in_dm: bool
     group_ack_text: str | None
     min_confidence: float | None
+    review_when_uncertain: bool
+    review_min_confidence: float | None
     enabled: bool
 
 
@@ -219,6 +221,8 @@ class ScenarioCreate(BaseModel):
     reply_in_dm: bool = False
     group_ack_text: str | None = None
     min_confidence: float | None = Field(default=None, ge=0, le=1)
+    review_when_uncertain: bool = False
+    review_min_confidence: float | None = Field(default=None, ge=0, le=1)
     enabled: bool = True
 
 

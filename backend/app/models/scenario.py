@@ -52,6 +52,14 @@ class Scenario(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     notify_topic_id: Mapped[int | None] = mapped_column(sa.BigInteger)
     min_confidence: Mapped[float | None] = mapped_column(sa.Numeric(3, 2))
 
+    # Human-in-the-loop: если ИИ не уверен (уверенность в полосе
+    # [review_min_confidence, порог правила)), ответ не уходит сразу, а летит
+    # оператору в лог-чат карточкой с кнопками «Отправить»/«Проигнорировать».
+    review_when_uncertain: Mapped[bool] = mapped_column(
+        sa.Boolean, nullable=False, default=False
+    )
+    review_min_confidence: Mapped[float | None] = mapped_column(sa.Numeric(3, 2))
+
     enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=True)
 
     __table_args__ = (

@@ -32,6 +32,9 @@ export default function ScenariosPage() {
   const [handoff, setHandoff] = useState(false);
   const [replyInDm, setReplyInDm] = useState(false);
   const [groupAck, setGroupAck] = useState('Отправлю в лс 🙂');
+  const [leadCriteria, setLeadCriteria] = useState('');
+  const [reviewUncertain, setReviewUncertain] = useState(false);
+  const [reviewMin, setReviewMin] = useState('0.4');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -48,6 +51,9 @@ export default function ScenariosPage() {
         human_handoff_enabled: handoff,
         reply_in_dm: replyInDm,
         group_ack_text: groupAck.trim() || null,
+        lead_criteria: leadCriteria.trim() || null,
+        review_when_uncertain: reviewUncertain,
+        review_min_confidence: reviewUncertain && reviewMin ? Number(reviewMin) : null,
         context_messages: 15,
       });
       setName('');
@@ -137,6 +143,41 @@ export default function ScenariosPage() {
                 className={inputClass}
                 value={groupAck}
                 onChange={(e) => setGroupAck(e.target.value)}
+              />
+            </Field>
+          )}
+          <div className="lg:col-span-2">
+            <Field
+              label="Критерий лида (для анализатора)"
+              hint="Что считать настоящим запросом, а что нет. Пусто — берётся системный промпт"
+            >
+              <textarea
+                className={`${inputClass} h-20 resize-y`}
+                value={leadCriteria}
+                onChange={(e) => setLeadCriteria(e.target.value)}
+                placeholder="Настоящий лид: человек сам ищет услугу для себя. НЕ лид: шутки, за другого, уже есть…"
+              />
+            </Field>
+          </div>
+          <label className="flex items-end gap-2 pb-2 text-sm text-slate-400">
+            <input
+              type="checkbox"
+              checked={reviewUncertain}
+              onChange={(e) => setReviewUncertain(e.target.checked)}
+              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
+            />
+            Сомнительные — на подтверждение (кнопки в лог-чате)
+          </label>
+          {reviewUncertain && (
+            <Field
+              label="Порог сомнения"
+              hint="Уверенность от этого значения до порога правила уходит на подтверждение"
+            >
+              <input
+                className={inputClass}
+                value={reviewMin}
+                onChange={(e) => setReviewMin(e.target.value.replace(/[^0-9.]/g, ''))}
+                placeholder="0.4"
               />
             </Field>
           )}

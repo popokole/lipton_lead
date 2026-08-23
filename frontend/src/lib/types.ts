@@ -95,6 +95,9 @@ export interface Scenario {
   require_knowledge_grounding: boolean;
   reply_in_dm?: boolean;
   group_ack_text?: string | null;
+  lead_criteria?: string | null;
+  review_when_uncertain?: boolean;
+  review_min_confidence?: number | null;
   fallback_text: string | null;
   enabled: boolean;
 }
@@ -105,6 +108,7 @@ export type ActionType =
   | 'SAVE_LEAD'
   | 'TAG_USER'
   | 'ESCALATE_TO_HUMAN'
+  | 'REQUEST_REVIEW'
   | 'IGNORE';
 
 export interface Rule {

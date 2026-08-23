@@ -42,6 +42,8 @@ class NotifySettings(TimestampMixin, Base):
     # Создаются лениво (как топики сценариев) и запоминаются здесь.
     dm_topic_id: Mapped[int | None] = mapped_column(TelegramId)
     group_topic_id: Mapped[int | None] = mapped_column(TelegramId)
+    # Топик «на подтверждение»: карточки сомнительных ответов с кнопками.
+    review_topic_id: Mapped[int | None] = mapped_column(TelegramId)
 
     bot_username: Mapped[str | None] = mapped_column(sa.String(64))
     last_error: Mapped[str | None] = mapped_column(sa.Text)

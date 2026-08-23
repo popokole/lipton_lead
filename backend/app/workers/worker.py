@@ -30,6 +30,7 @@ from app.actions.handlers import (
     IgnoreHandler,
     NotifyAdminHandler,
     ReplyHandler,
+    ReviewHandler,
     SaveLeadHandler,
     TagUserHandler,
 )
@@ -124,6 +125,7 @@ class Worker:
             asyncio.create_task(self._heartbeat_loop(), name="worker-heartbeat"),
             asyncio.create_task(self._poll_loop(), name="worker-poll"),
             asyncio.create_task(self._command_loop(), name="worker-commands"),
+            asyncio.create_task(self._review_poll_loop(), name="worker-review"),
         ]
         self.set_status(STATUS_HEALTHY)
         await self._sync_status_to_db()
@@ -203,6 +205,10 @@ class Worker:
             ReplyHandler(
                 database, self._clients, self._sender, publisher, self._peers, self._notifier
             ),
+        )
+        actions.register(
+            ActionType.REQUEST_REVIEW,
+            ReviewHandler(database, publisher, notifier=self._notifier),
         )
         actions.register(ActionType.NOTIFY_ADMIN, NotifyAdminHandler(database, publisher))
         actions.register(ActionType.SAVE_LEAD, SaveLeadHandler(database, publisher))
@@ -344,6 +350,169 @@ class Worker:
                 logger.exception("message_handling_failed", account_id=str(account_id))
 
         return handle
+
+    async def _review_poll_loop(self) -> None:
+        """Опрашивает бота-уведомитель на нажатия кнопок под карточками ревью.
+
+        Один опросчик на воркер: getUpdates нельзя вызывать конкурентно. Пока
+        бот не настроен — просто ждём. Решения идемпотентны по review.status.
+        """
+        offset = 0
+        while not self._stop.is_set():
+            try:
+                async with self.runtime.database.session() as db:
+                    loaded = await self._notifier.load_token(db)
+                if loaded is None:
+                    await self._sleep(15)
+                    continue
+                token, group_id = loaded
+                updates = await self._notifier.poll_updates(token, offset)
+                for upd in updates:
+                    offset = max(offset, int(upd.get("update_id", 0)) + 1)
+                    callback = upd.get("callback_query")
+                    if callback:
+                        await self._handle_review_callback(token, group_id, callback)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — опрос не критичнее работы
+                logger.warning("review_poll_failed", detail=str(exc)[:200])
+                await self._sleep(5)
+
+    async def _handle_review_callback(
+        self, token: str, group_id: int, callback: dict[str, Any]
+    ) -> None:
+        from app.core.clock import utcnow
+        from app.models import PendingReview
+
+        data = str(callback.get("data") or "")
+        cb_id = str(callback.get("id") or "")
+        action, _, raw_id = data.partition(":")
+        try:
+            review_id = uuid.UUID(raw_id)
+        except ValueError:
+            await self._notifier.answer_callback(token, cb_id, "неизвестная кнопка")
+            return
+
+        async with self.runtime.database.session() as db:
+            review = await db.get(PendingReview, review_id)
+            if review is None or review.status != "pending":
+                await self._notifier.answer_callback(token, cb_id, "уже обработано")
+                return
+            message_id = review.notify_message_id
+
+            if action == "rv_skip":
+                review.status = "ignored"
+                review.decided_at = utcnow()
+                await self._notifier.answer_callback(token, cb_id, "Пропущено")
+                if message_id:
+                    await self._notifier.finalize_review_card(
+                        token, group_id, message_id, "✖️ Пропущено оператором"
+                    )
+                return
+
+            ok, detail = await self._execute_review(db, review)
+            if ok:
+                review.status = "sent"
+                review.decided_at = utcnow()
+                await self._notifier.answer_callback(token, cb_id, "Отправлено ✅")
+                if message_id:
+                    await self._notifier.finalize_review_card(
+                        token, group_id, message_id, "✅ Отправлено оператором"
+                    )
+            else:
+                await self._notifier.answer_callback(token, cb_id, detail[:180] or "не удалось")
+
+    async def _execute_review(self, db: Any, review: Any) -> tuple[bool, str]:
+        """Отправляет подтверждённый ответ и записывает его (как обычный ответ)."""
+        from app.core.clock import utcnow
+        from app.database.repositories.chats import ChatRepository
+        from app.database.repositories.conversations import LeadRepository
+        from app.models import ChatType, Message, ProcessedStatus
+
+        client = self._clients.get(review.account_id)
+        if client is None:
+            return False, "аккаунт не подключён на воркере"
+        try:
+            peer = self._peers.get(review.account_id, review.tg_chat_id)
+            sent = await self._sender.send(
+                review.account_id,
+                client,
+                chat_id=review.tg_chat_id,
+                text=review.reply_text,
+                reply_to=review.reply_to_tg_message_id,
+                peer=peer,
+            )
+        except Exception as exc:  # noqa: BLE001 — покажем оператору причину
+            return False, f"{type(exc).__name__}: {exc}"
+
+        db.add(
+            Message(
+                account_id=review.account_id,
+                chat_id=review.chat_id,
+                tg_chat_id=review.tg_chat_id,
+                tg_message_id=sent.tg_message_id,
+                text=review.reply_text,
+                date=utcnow(),
+                reply_to_tg_message_id=review.reply_to_tg_message_id,
+                is_incoming=False,
+                is_outgoing=True,
+                is_bot_reply=True,
+                processed_status=ProcessedStatus.REPLIED,
+                rule_id=review.rule_id,
+            )
+        )
+        # Развёрнутый ответ в личку (режим чат+лс).
+        if review.dm_text and review.target_sender_tg_id is not None:
+            try:
+                sender_peer = self._peers.get_sender(review.account_id, review.target_sender_tg_id)
+                dm_sent = await self._sender.send(
+                    review.account_id,
+                    client,
+                    chat_id=review.target_sender_tg_id,
+                    text=review.dm_text,
+                    peer=sender_peer,
+                )
+                dm_chat = await ChatRepository(db).ensure(
+                    review.account_id,
+                    review.target_sender_tg_id,
+                    chat_type=ChatType.PRIVATE,
+                    title=review.sender_display_name
+                    or (f"@{review.sender_username}" if review.sender_username else None),
+                    username=review.sender_username,
+                )
+                db.add(
+                    Message(
+                        account_id=review.account_id,
+                        chat_id=dm_chat.id,
+                        tg_chat_id=review.target_sender_tg_id,
+                        tg_message_id=dm_sent.tg_message_id,
+                        text=review.dm_text,
+                        date=utcnow(),
+                        is_incoming=False,
+                        is_outgoing=True,
+                        is_bot_reply=True,
+                        processed_status=ProcessedStatus.REPLIED,
+                        rule_id=review.rule_id,
+                    )
+                )
+                await ChatRepository(db).touch(dm_chat.id)
+            except Exception as exc:  # noqa: BLE001 — личка вторична
+                logger.warning("review_dm_failed", detail=str(exc)[:150])
+
+        if review.target_sender_tg_id is not None:
+            score = int(float(review.confidence) * 100) if review.confidence is not None else 50
+            await LeadRepository(db).upsert(
+                review.account_id,
+                review.target_sender_tg_id,
+                score=score,
+                intent=None,
+                username=review.sender_username,
+                display_name=review.sender_display_name,
+                source_chat_id=review.chat_id,
+                conversation_id=None,
+                scenario_id=review.scenario_id,
+            )
+        return True, "ok"
 
     async def _refresh_own_ids(self) -> None:
         """Обновляет реестр собственных Telegram-id (защита от самоответа)."""

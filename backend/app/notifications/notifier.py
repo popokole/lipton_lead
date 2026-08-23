@@ -109,6 +109,12 @@ class NotifierBot:
                 )
                 row.group_topic_id = int(topic["message_thread_id"])
                 created += 1
+            if row.review_topic_id is None:
+                topic = await self._call(
+                    token, "createForumTopic", chat_id=group_id, name="На подтверждение"
+                )
+                row.review_topic_id = int(topic["message_thread_id"])
+                created += 1
 
         await db.flush()
         return {
@@ -188,6 +194,100 @@ class NotifierBot:
         except Exception as exc:  # noqa: BLE001 — уведомление не критично
             logger.warning("notify_failed", detail=str(exc)[:200])
             await self._record_error(db, str(exc)[:300])
+
+    async def send_review(self, db: AsyncSession, review: Any) -> None:
+        """Шлёт карточку сомнительного ответа с кнопками в топик «на подтверждение».
+
+        review — строка PendingReview. Топик создаётся лениво. id отправленного
+        сообщения запоминаем в review.notify_message_id, чтобы потом отредактировать
+        карточку после решения оператора. Никогда не роняет обработку.
+        """
+        try:
+            settings = await self._load_settings(db)
+            if settings is None:
+                return
+            token, group_id = settings
+            row = await db.get(NotifySettings, SINGLETON_ID)
+            if row is None:
+                return
+            thread_id = row.review_topic_id
+            if thread_id is None:
+                topic = await self._call(
+                    token, "createForumTopic", chat_id=group_id, name="На подтверждение"
+                )
+                thread_id = int(topic["message_thread_id"])
+                row.review_topic_id = thread_id
+                await db.flush()
+            keyboard = {
+                "inline_keyboard": [
+                    [
+                        {"text": "✅ Отправить", "callback_data": f"rv_send:{review.id}"},
+                        {"text": "✖️ Проигнорировать", "callback_data": f"rv_skip:{review.id}"},
+                    ]
+                ]
+            }
+            result = await self._call(
+                token,
+                "sendMessage",
+                chat_id=group_id,
+                message_thread_id=thread_id,
+                text=format_review_card(review),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
+            review.notify_message_id = int(result["message_id"])
+            await db.flush()
+        except Exception as exc:  # noqa: BLE001 — уведомление не критично
+            logger.warning("send_review_failed", detail=str(exc)[:200])
+
+    async def load_token(self, db: AsyncSession) -> tuple[str, int] | None:
+        """Токен и id группы для опроса нажатий (или None, если не настроено)."""
+        return await self._load_settings(db, require_enabled=True)
+
+    async def poll_updates(self, token: str, offset: int) -> list[dict[str, Any]]:
+        """Забирает обновления бота (только нажатия кнопок) через long-poll."""
+        resp = await self._client.post(
+            f"{API_BASE}/bot{token}/getUpdates",
+            json={
+                "offset": offset,
+                "timeout": 25,
+                "allowed_updates": ["callback_query"],
+            },
+            timeout=httpx.Timeout(35.0),
+        )
+        data = resp.json()
+        if not data.get("ok"):
+            raise NotifyError(data.get("description") or "getUpdates failed")
+        result = data["result"]
+        return list(result) if isinstance(result, list) else []
+
+    async def answer_callback(self, token: str, callback_id: str, text: str) -> None:
+        with contextlib.suppress(Exception):
+            await self._call(
+                token, "answerCallbackQuery", callback_query_id=callback_id, text=text
+            )
+
+    async def finalize_review_card(
+        self, token: str, group_id: int, message_id: int, suffix: str
+    ) -> None:
+        """Убирает кнопки и дописывает исход после решения оператора."""
+        with contextlib.suppress(Exception):
+            await self._call(
+                token,
+                "editMessageReplyMarkup",
+                chat_id=group_id,
+                message_id=message_id,
+                reply_markup={"inline_keyboard": []},
+            )
+        with contextlib.suppress(Exception):
+            await self._call(
+                token,
+                "sendMessage",
+                chat_id=group_id,
+                reply_to_message_id=message_id,
+                text=suffix,
+            )
 
     async def _load_settings(
         self, db: AsyncSession, *, require_enabled: bool = True
@@ -282,6 +382,21 @@ def format_lead_card(
         f"<b>Сообщение:</b>\n{_esc(incoming_text[:400])}\n\n"
         f"<b>Наш ответ:</b>\n{_esc(reply_text[:400])}"
     )
+
+
+def format_review_card(review: Any) -> str:
+    """Карточка сомнительного ответа: что пришло, что предлагаем ответить."""
+    who = review.sender_display_name or (
+        f"@{review.sender_username}" if review.sender_username else str(review.target_sender_tg_id or "?")
+    )
+    conf = f"{float(review.confidence):.2f}" if review.confidence is not None else "?"
+    parts = [
+        f"🟡 <b>Сомнительный лид</b> · уверенность {conf}",
+        f"👤 {_esc(who)}",
+        f"\n<b>Сообщение:</b>\n{_esc((review.incoming_text or '')[:400])}",
+        f"\n<b>Предлагаю ответить:</b>\n{_esc((review.dm_text or review.reply_text or '')[:500])}",
+    ]
+    return "\n".join(parts)
 
 
 def _esc(text: str) -> str:

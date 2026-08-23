@@ -46,6 +46,7 @@ _ACTION_TO_PROCESSED_STATUS: dict[ActionType, ProcessedStatus] = {
     ActionType.REPLY: ProcessedStatus.REPLIED,
     ActionType.IGNORE: ProcessedStatus.IGNORED,
     ActionType.ESCALATE_TO_HUMAN: ProcessedStatus.ESCALATED,
+    ActionType.REQUEST_REVIEW: ProcessedStatus.ESCALATED,
 }
 
 
@@ -127,6 +128,7 @@ class ReplyPipeline:
             )
 
         analysis: AnalysisOutcome | None = None
+        review_mode = False
         if rule.ai_enabled:
             if self._analyzer is None:
                 return await self._escalate(
@@ -172,17 +174,36 @@ class ReplyPipeline:
                 )
 
             # Хендофф выключен, но модель не уверена или отказалась — не выдумываем
-            # ответ, просто пропускаем.
+            # ответ, просто пропускаем. Исключение — режим «подтверждать
+            # сомнительные»: если это похоже на лид (relevant), но уверенность в
+            # полосе [review_min, порог), готовим ответ и отдаём его оператору на
+            # подтверждение кнопками, а не молча пропускаем.
             if analysis.failed or not analysis.passes_threshold or not analysis.result.relevant:
-                return await self._ignore(
-                    message,
-                    match,
-                    chat_id,
-                    message_id,
-                    f"AI: не отвечать (confidence {analysis.result.confidence:.2f}, "
-                    f"порог {analysis.threshold:.2f})",
-                    analysis=analysis,
+                conf = analysis.result.confidence
+                review_min = (
+                    float(scenario.review_min_confidence)
+                    if scenario and scenario.review_min_confidence is not None
+                    else 0.4
                 )
+                borderline = (
+                    scenario is not None
+                    and scenario.review_when_uncertain
+                    and not analysis.failed
+                    and analysis.result.relevant
+                    and review_min <= conf < analysis.threshold
+                )
+                if borderline:
+                    review_mode = True
+                else:
+                    return await self._ignore(
+                        message,
+                        match,
+                        chat_id,
+                        message_id,
+                        f"AI: не отвечать (confidence {conf:.2f}, "
+                        f"порог {analysis.threshold:.2f})",
+                        analysis=analysis,
+                    )
 
         scenario = await self._load_scenario(rule.scenario_id)
         if scenario is None or self._generator is None:
@@ -290,6 +311,7 @@ class ReplyPipeline:
             used_knowledge=generation.reply.used_knowledge,
             cooldown_keys=cooldown_keys,
             analysis=analysis,
+            review=review_mode,
         )
 
     # --- отправка ----------------------------------------------------------
@@ -307,6 +329,7 @@ class ReplyPipeline:
         used_knowledge: bool,
         cooldown_keys: CooldownKeys,
         analysis: AnalysisOutcome | None,
+        review: bool = False,
     ) -> ReplyOutcome:
         verdict = self._validator.validate(
             ValidationContext(
@@ -331,6 +354,57 @@ class ReplyPipeline:
                 conversation_id=context.conversation_id,
             )
 
+        # Лид = тот, кому мы ответили хотя бы раз. Балл берём из уверенности
+        # ИИ (0..100); без AI-проверки — базовый, чтобы лид всё равно завёлся.
+        if analysis is not None:
+            lead_score = round(analysis.result.confidence * 100)
+            intent = analysis.result.intent.value
+            confidence: float | None = analysis.result.confidence
+        else:
+            lead_score = 40
+            intent = None
+            confidence = None
+
+        # Групповой лид при включённом reply_in_dm: в чат — короткая фраза
+        # (её ИИ сгенерил в group_text; запасная — из сценария), а развёрнутый
+        # ответ ИИ уходит автору в личку.
+        reply_text = text
+        dm_text: str | None = None
+        if scenario.reply_in_dm and not message.is_private and message.sender_tg_id is not None:
+            reply_text = group_text or scenario.group_ack_text or "Отправлю в лс 🙂"
+            dm_text = text
+
+        # ИИ не уверен: не отправляем сразу, а кладём на подтверждение оператору
+        # (карточка с кнопками в лог-чате). Кулдаун здесь не трогаем.
+        if review:
+            review_payload: dict[str, object] = {"confidence": confidence}
+            if dm_text:
+                review_payload["dm_text"] = dm_text
+            result = await self._actions.dispatch(
+                ActionRequest(
+                    type=ActionType.REQUEST_REVIEW,
+                    account_id=message.account_id,
+                    dedup_key=_dedup_key(message, ActionType.REQUEST_REVIEW),
+                    message=message,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    conversation_id=context.conversation_id,
+                    rule_id=match.rule.id,
+                    scenario_id=scenario.id,
+                    reply_text=reply_text,
+                    validation=verdict.to_payload(),
+                    payload=review_payload,
+                )
+            )
+            return ReplyOutcome(
+                action=ActionType.REQUEST_REVIEW,
+                status=result.status,
+                reason="на подтверждении оператора",
+                action_id=result.action_id,
+                analysis=analysis,
+                validation=verdict,
+            )
+
         allowed, claim = await self._cooldown.claim(cooldown_keys, match.rule.cooldown)
         if not allowed:
             return await self._ignore(
@@ -342,23 +416,9 @@ class ReplyPipeline:
                 analysis=analysis,
             )
 
-        # Лид = тот, кому мы ответили хотя бы раз. Балл берём из уверенности
-        # ИИ (0..100); без AI-проверки — базовый, чтобы лид всё равно завёлся.
-        if analysis is not None:
-            lead_score = round(analysis.result.confidence * 100)
-            intent = analysis.result.intent.value
-        else:
-            lead_score = 40
-            intent = None
-
         action_payload: dict[str, object] = {"lead_score": lead_score, "intent": intent}
-        reply_text = text
-        # Групповой лид при включённом reply_in_dm: в чат — короткая фраза
-        # (её ИИ сгенерил в group_text; запасная — из сценария), а развёрнутый
-        # ответ ИИ уходит автору в личку.
-        if scenario.reply_in_dm and not message.is_private and message.sender_tg_id is not None:
-            reply_text = group_text or scenario.group_ack_text or "Отправлю в лс 🙂"
-            action_payload["dm_text"] = text
+        if dm_text:
+            action_payload["dm_text"] = dm_text
 
         result = await self._actions.dispatch(
             ActionRequest(

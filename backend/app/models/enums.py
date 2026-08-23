@@ -98,6 +98,9 @@ class ActionType(StrEnum):
     SAVE_LEAD = "SAVE_LEAD"
     TAG_USER = "TAG_USER"
     ESCALATE_TO_HUMAN = "ESCALATE_TO_HUMAN"
+    # Ответ сгенерирован, но ИИ не уверен: отправляем оператору на подтверждение
+    # (карточка с кнопками в лог-чате), а не сразу собеседнику.
+    REQUEST_REVIEW = "REQUEST_REVIEW"
     IGNORE = "IGNORE"
 
 
