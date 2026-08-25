@@ -102,6 +102,32 @@ services:
     restart: unless-stopped
     expose:
       - "3000"
+    # Next иногда «повисает» (процесс жив, но не отвечает) — healthcheck это
+    # ловит, а autoheal перезапускает контейнер. fetch есть в Node 18+, лишних
+    # утилит не требует.
+    labels:
+      - autoheal=true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Перезапускает ТОЛЬКО контейнеры с меткой autoheal=true (наш фронт). ВПН и
+  # прочее на хосте не трогает — метки на них нет.
+  autoheal:
+    image: willfarrell/autoheal
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: "15"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
   nginx:
     image: nginx:1.27-alpine
