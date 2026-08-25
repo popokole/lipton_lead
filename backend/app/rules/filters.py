@@ -112,9 +112,8 @@ class StopGuard:
     def blocked(self, message: NormalizedMessage) -> bool:
         if message.sender_tg_id is not None and message.sender_tg_id in self._ids:
             return True
-        if message.sender_username and message.sender_username.lstrip("@").lower() in self._usernames:
-            return True
-        return False
+        username = (message.sender_username or "").lstrip("@").lower()
+        return bool(username) and username in self._usernames
 
 
 def check_message(message: NormalizedMessage, spec: MessageFilterSpec) -> FilterVerdict:
