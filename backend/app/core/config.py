@@ -147,6 +147,16 @@ class Settings(BaseSettings):
         default=300, ge=0, alias="CHAT_REPLY_COOLDOWN_SECONDS"
     )
     max_consecutive_ai_replies: int = Field(default=3, ge=1, alias="MAX_CONSECUTIVE_AI_REPLIES")
+    # Рабочие часы (по-человечески: не отвечаем ночью). Час начала и конца в
+    # часовом поясе work_hours_tz_offset. Если start == end — режим выключен.
+    work_hours_start: int = Field(default=0, ge=0, le=23, alias="WORK_HOURS_START")
+    work_hours_end: int = Field(default=0, ge=0, le=24, alias="WORK_HOURS_END")
+    work_hours_tz_offset: int = Field(default=3, ge=-12, le=14, alias="WORK_HOURS_TZ_OFFSET")
+    # Антидубликат: не слать один и тот же текст с аккаунта чаще, чем раз в
+    # это окно — иначе повтор палит бота. При совпадении текст слегка меняется.
+    anti_duplicate_ttl_seconds: int = Field(
+        default=21600, ge=0, alias="ANTI_DUPLICATE_TTL_SECONDS"
+    )
     summary_every_n_messages: int = Field(default=15, ge=1, alias="SUMMARY_EVERY_N_MESSAGES")
     duplicate_window_seconds: int = Field(default=86400, ge=1, alias="DUPLICATE_WINDOW_SECONDS")
 

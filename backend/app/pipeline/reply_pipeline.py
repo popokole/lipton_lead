@@ -138,6 +138,13 @@ class ReplyPipeline:
                     message, match, chat_id, message_id, "анти-бан: лимит на чат"
                 )
 
+        # По-человечески: ночью не отвечаем (вне рабочих часов). Сообщение
+        # сохранено, ответа нет — как живой человек, который спит.
+        if not self._within_work_hours():
+            return await self._ignore(
+                message, match, chat_id, message_id, "вне рабочих часов"
+            )
+
         analysis: AnalysisOutcome | None = None
         review_mode = False
         if rule.ai_enabled:
@@ -460,6 +467,11 @@ class ReplyPipeline:
                 analysis=analysis,
             )
 
+        # Антидубликат: не отправлять байт-в-байт повтор с этого аккаунта.
+        reply_text = await self._dedupe_text(message.account_id, reply_text)
+        if dm_text:
+            dm_text = await self._dedupe_text(message.account_id, dm_text)
+
         action_payload: dict[str, object] = {"lead_score": lead_score, "intent": intent}
         if dm_text:
             action_payload["dm_text"] = dm_text
@@ -604,6 +616,40 @@ class ReplyPipeline:
         async with self._database.session() as db:
             return await RuleRepository(db).get_scenario(scenario_id)
 
+    def _within_work_hours(self) -> bool:
+        """True, если сейчас рабочие часы (или режим выключен)."""
+        from datetime import timedelta
+
+        from app.core.clock import utcnow
+
+        start, end = self._settings.work_hours_start, self._settings.work_hours_end
+        if start == end:
+            return True  # выключено
+        hour = (utcnow() + timedelta(hours=self._settings.work_hours_tz_offset)).hour
+        if start < end:
+            return start <= hour < end
+        return hour >= start or hour < end  # окно через полночь
+
+    async def _dedupe_text(self, account_id: uuid.UUID, text: str) -> str:
+        """Не отправлять один и тот же текст с аккаунта дважды за окно.
+
+        Байт-в-байт повтор — сильный признак бота. Если такой текст уже уходил
+        недавно, слегка меняем хвост (смысл сохраняется), чтобы не палиться.
+        """
+        import hashlib
+
+        ttl = self._settings.anti_duplicate_ttl_seconds
+        if ttl <= 0 or not text.strip():
+            return text
+        norm = text.strip().lower()
+        digest = hashlib.sha1(norm.encode()).hexdigest()[:16]  # noqa: S324 — не крипта
+        if await self._cooldown.claim_once(f"dup:{account_id}:{digest}", ttl):
+            return text
+        varied = _vary_text(text)
+        vdigest = hashlib.sha1(varied.strip().lower().encode()).hexdigest()[:16]  # noqa: S324
+        await self._cooldown.claim_once(f"dup:{account_id}:{vdigest}", ttl)
+        return varied
+
     async def _chat_cooldown_exempt(self, chat_id: uuid.UUID | None) -> bool:
         if chat_id is None:
             return False
@@ -675,6 +721,18 @@ class ReplyPipeline:
             if variant is None:
                 return None
             return variant.id, variant.text
+
+
+_VARY_TAILS = (")", " 🙂", "", ".", " 🫶", "", " )", "..")
+
+
+def _vary_text(text: str) -> str:
+    """Лёгкая правка хвоста, чтобы текст не был байт-в-байт повтором."""
+    from app.core.clock import utcnow
+
+    base = text.rstrip(" .)🙂🫶")
+    tail = _VARY_TAILS[utcnow().microsecond % len(_VARY_TAILS)]
+    return (base + tail).strip() or text
 
 
 def _scenario_settings(scenario: Scenario) -> ScenarioSettings:
