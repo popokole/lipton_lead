@@ -51,8 +51,12 @@ def _out(v: AbVariant) -> AbVariantOut:
     )
 
 
-@router.get("/{scenario_id}", response_model=list[AbVariantOut], summary="Варианты заходов")
-async def list_variants(scenario_id: uuid.UUID, _user: CurrentUser, db: DbDep) -> list[AbVariantOut]:
+@router.get(
+    "/{scenario_id}", response_model=list[AbVariantOut], summary="Варианты заходов"
+)
+async def list_variants(
+    scenario_id: uuid.UUID, _user: CurrentUser, db: DbDep
+) -> list[AbVariantOut]:
     rows = await db.scalars(
         select(AbVariant)
         .where(AbVariant.scenario_id == scenario_id)
@@ -61,7 +65,9 @@ async def list_variants(scenario_id: uuid.UUID, _user: CurrentUser, db: DbDep) -
     return [_out(v) for v in rows.all()]
 
 
-@router.post("/{scenario_id}", response_model=AbVariantOut, status_code=201, summary="Добавить заход")
+@router.post(
+    "/{scenario_id}", response_model=AbVariantOut, status_code=201, summary="Добавить заход"
+)
 async def add_variant(
     scenario_id: uuid.UUID, payload: AbVariantCreate, _user: OperatorUser, db: DbDep
 ) -> AbVariantOut:
