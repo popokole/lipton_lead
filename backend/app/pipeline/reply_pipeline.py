@@ -642,11 +642,11 @@ class ReplyPipeline:
         if ttl <= 0 or not text.strip():
             return text
         norm = text.strip().lower()
-        digest = hashlib.sha1(norm.encode()).hexdigest()[:16]  # noqa: S324 — не крипта
+        digest = hashlib.sha1(norm.encode()).hexdigest()[:16]
         if await self._cooldown.claim_once(f"dup:{account_id}:{digest}", ttl):
             return text
         varied = _vary_text(text)
-        vdigest = hashlib.sha1(varied.strip().lower().encode()).hexdigest()[:16]  # noqa: S324
+        vdigest = hashlib.sha1(varied.strip().lower().encode()).hexdigest()[:16]
         await self._cooldown.claim_once(f"dup:{account_id}:{vdigest}", ttl)
         return varied
 
