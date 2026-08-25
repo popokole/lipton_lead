@@ -129,25 +129,28 @@ class KnowledgeRepository:
 
     # --- поиск --------------------------------------------------------------
     async def retrieve(self, kb_id: uuid.UUID, query: str, limit: int = 5) -> list[str]:
-        """Топ релевантных чанков по русскому FTS. Пусто — если совпадений нет."""
-        cleaned = (query or "").strip()
-        if not cleaned:
+        """Топ релевантных чанков по русскому FTS.
+
+        Термины объединяются по OR (совпадение по любому слову), а не AND: иначе
+        «сколько стоит терапия» не найдёт «стоимость терапии». Ранжируем по
+        ts_rank — куски с большим числом совпадений идут первыми.
+        """
+        words = [w for w in re.findall(r"\w+", (query or "").lower()) if len(w) >= 3]
+        if not words:
             return []
+        tsq = " | ".join(words)
         stmt = (
             select(KnowledgeChunk.content)
             .where(
                 KnowledgeChunk.knowledge_base_id == kb_id,
-                text(
-                    "to_tsvector('russian', content) @@ plainto_tsquery('russian', :q)"
-                ),
+                text("to_tsvector('russian', content) @@ to_tsquery('russian', :q)"),
             )
             .order_by(
                 text(
-                    "ts_rank(to_tsvector('russian', content), "
-                    "plainto_tsquery('russian', :q)) DESC"
+                    "ts_rank(to_tsvector('russian', content), to_tsquery('russian', :q)) DESC"
                 )
             )
             .limit(limit)
         )
-        rows = await self._db.execute(stmt, {"q": cleaned})
+        rows = await self._db.execute(stmt, {"q": tsq})
         return [r[0] for r in rows.all()]
