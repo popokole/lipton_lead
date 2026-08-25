@@ -168,6 +168,17 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
     }
   };
 
+  const toggleCooldownExempt = async () => {
+    try {
+      await api.post(`/conversations/${thread.chat_id}/cooldown-exempt`, {
+        enabled: !thread.cooldown_exempt,
+      });
+      onSent();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    }
+  };
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [messages.data]);
@@ -222,6 +233,19 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
               }`}
             >
               {togglingAi ? '…' : thread.ai_chat ? '● Общение ИИ включено' : '○ Включить общение ИИ'}
+            </button>
+          )}
+          {thread.kind === 'group' && (
+            <button
+              onClick={() => void toggleCooldownExempt()}
+              title="Без анти-бан лимита: в этот чат можно отвечать без задержки «раз в N минут»"
+              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                thread.cooldown_exempt
+                  ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                  : 'border border-ink-600 text-slate-400 hover:bg-ink-800'
+              }`}
+            >
+              {thread.cooldown_exempt ? '∞ без лимита' : '⏱ лимит вкл'}
             </button>
           )}
         </div>

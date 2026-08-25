@@ -32,6 +32,8 @@ class Chat(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     username: Mapped[str | None] = mapped_column(sa.String(64))
 
     monitored: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
+    # Чат без анти-бан лимита: сюда можно отвечать без задержки «раз в N минут».
+    cooldown_exempt: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
     members_count: Mapped[int | None] = mapped_column(sa.Integer)
     last_message_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
 

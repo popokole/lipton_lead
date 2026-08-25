@@ -37,6 +37,7 @@ export default function ScenariosPage() {
   const [reviewMin, setReviewMin] = useState('0.4');
   const knowledgeBases = useApi<{ id: string; name: string }[]>('/knowledge', 30_000);
   const [kbId, setKbId] = useState('');
+  const [oneShot, setOneShot] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -57,6 +58,7 @@ export default function ScenariosPage() {
         review_when_uncertain: reviewUncertain,
         review_min_confidence: reviewUncertain && reviewMin ? Number(reviewMin) : null,
         knowledge_base_id: kbId || null,
+        one_shot: oneShot,
         context_messages: 15,
       });
       setName('');
@@ -149,6 +151,15 @@ export default function ScenariosPage() {
               className="h-4 w-4 rounded border-ink-600 bg-ink-950"
             />
             В группе — короткий ответ, полный ИИ-ответ в личку
+          </label>
+          <label className="flex items-end gap-2 pb-2 text-sm text-slate-400">
+            <input
+              type="checkbox"
+              checked={oneShot}
+              onChange={(e) => setOneShot(e.target.checked)}
+              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
+            />
+            Один заход: ответить собеседнику один раз и больше не писать
           </label>
           {replyInDm && (
             <Field label="Фраза в группу" hint="Что видят в чате; полный ответ уйдёт в личку">

@@ -127,6 +127,17 @@ class ReplyPipeline:
                 message, match, chat_id, message_id, f"cooldown: {early.blocked_by}"
             )
 
+        # Анти-бан: не чаще раза в N минут в один чат (группу). Личку не трогаем
+        # (там свой one_shot/логика), чаты с cooldown_exempt — без лимита.
+        # Занимаем ключ здесь, до AI, чтобы не тратить генерацию впустую.
+        chat_cd = self._settings.chat_reply_cooldown_seconds
+        if chat_cd > 0 and not message.is_private and not await self._chat_cooldown_exempt(chat_id):
+            key = f"chatcd:{message.account_id}:{message.tg_chat_id}"
+            if not await self._cooldown.claim_once(key, chat_cd):
+                return await self._ignore(
+                    message, match, chat_id, message_id, "анти-бан: лимит на чат"
+                )
+
         analysis: AnalysisOutcome | None = None
         review_mode = False
         if rule.ai_enabled:
@@ -209,6 +220,17 @@ class ReplyPipeline:
         if scenario is None or self._generator is None:
             return await self._escalate(
                 message, match, chat_id, message_id, "нет сценария для ответа", analysis=analysis
+            )
+
+        # «Один заход»: если с этим собеседником уже связывались — больше не
+        # пишем (одно первое сообщение с контактом и всё).
+        if (
+            scenario.one_shot
+            and message.sender_tg_id is not None
+            and await self._already_contacted(message.account_id, message.sender_tg_id)
+        ):
+            return await self._ignore(
+                message, match, chat_id, message_id, "one_shot: уже связались", analysis=analysis
             )
 
         context = await self._context.build(
@@ -581,6 +603,30 @@ class ReplyPipeline:
             return None
         async with self._database.session() as db:
             return await RuleRepository(db).get_scenario(scenario_id)
+
+    async def _chat_cooldown_exempt(self, chat_id: uuid.UUID | None) -> bool:
+        if chat_id is None:
+            return False
+        from sqlalchemy import select
+
+        from app.models import Chat
+
+        async with self._database.session() as db:
+            return bool(await db.scalar(select(Chat.cooldown_exempt).where(Chat.id == chat_id)))
+
+    async def _already_contacted(self, account_id: uuid.UUID, peer_tg_id: int) -> bool:
+        """Отвечали ли этому собеседнику раньше (лид заводится на первом ответе)."""
+        from sqlalchemy import select
+
+        from app.models import Lead
+
+        async with self._database.session() as db:
+            found = await db.scalar(
+                select(Lead.id).where(
+                    Lead.account_id == account_id, Lead.tg_user_id == peer_tg_id
+                )
+            )
+            return found is not None
 
     async def _retrieve_knowledge(self, scenario: Scenario, query: str) -> list[str]:
         """Топ релевантных кусков базы знаний сценария (пусто — если не задана)."""

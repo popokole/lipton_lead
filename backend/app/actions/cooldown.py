@@ -116,6 +116,16 @@ class CooldownGuard:
         self._claim = redis.register_script(_CLAIM)
         self._release = redis.register_script(_RELEASE)
 
+    async def claim_once(self, key: str, seconds: int) -> bool:
+        """Занимает одиночный ключ на `seconds` (SET NX EX).
+
+        Возвращает True, если ключ был свободен (можно действовать), и False,
+        если он уже занят (идёт кулдаун). Используется для анти-бан лимита на чат.
+        """
+        if seconds <= 0:
+            return True
+        return bool(await self._redis.set(key, "1", nx=True, ex=seconds))
+
     async def check(self, cooldown_keys: CooldownKeys, spec: CooldownSpec) -> CooldownVerdict:
         """Дешёвая проверка перед обращением к AI."""
         scopes = cooldown_keys.scopes(spec)

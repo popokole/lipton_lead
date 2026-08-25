@@ -331,6 +331,7 @@ async def list_threads(
             Chat.title.label("title"),
             Chat.username.label("username"),
             Chat.monitored.label("monitored"),
+            Chat.cooldown_exempt.label("cooldown_exempt"),
             Chat.last_message_at.label("last_message_at"),
             (Chat.avatar.is_not(None)).label("has_avatar"),
             last_text.label("last_text"),
@@ -374,6 +375,7 @@ async def list_threads(
                 lead_score=row.lead_score,
                 lead_status=row.lead_status,
                 ai_chat=bool(row.ai_chat),
+                cooldown_exempt=bool(row.cooldown_exempt),
             )
         )
     return threads
@@ -525,6 +527,24 @@ async def toggle_ai_chat(
     rule.enabled = bool(remaining)
     await db.flush()
     return {"ai_chat": payload.enabled}
+
+
+class CooldownExemptIn(BaseModel):
+    enabled: bool
+
+
+@conversations_router.post(
+    "/{chat_id}/cooldown-exempt", summary="Чат без анти-бан лимита (вкл/выкл)"
+)
+async def toggle_cooldown_exempt(
+    chat_id: uuid.UUID, payload: CooldownExemptIn, _user: OperatorUser, db: DbDep
+) -> dict[str, bool]:
+    chat = await db.get(Chat, chat_id)
+    if chat is None:
+        raise NotFoundError("Чат не найден")
+    chat.cooldown_exempt = payload.enabled
+    await db.flush()
+    return {"cooldown_exempt": payload.enabled}
 
 
 @leads_router.get("", response_model=list[LeadOut], summary="Лиды")

@@ -60,6 +60,10 @@ class Scenario(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     review_min_confidence: Mapped[float | None] = mapped_column(sa.Numeric(3, 2))
 
+    # «Один заход»: отвечаем собеседнику РОВНО ОДИН раз (первое сообщение с
+    # контактом), дальше в этом диалоге молчим, даже если тема всплывёт снова.
+    one_shot: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
+
     enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=True)
 
     __table_args__ = (

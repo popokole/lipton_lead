@@ -141,6 +141,11 @@ class Settings(BaseSettings):
     max_context_messages: int = Field(default=20, ge=1, alias="MAX_CONTEXT_MESSAGES")
     max_message_length: int = Field(default=4000, ge=1, alias="MAX_MESSAGE_LENGTH")
     default_cooldown_seconds: int = Field(default=600, ge=0, alias="DEFAULT_COOLDOWN_SECONDS")
+    # Анти-бан: минимум секунд между нашими ответами в ОДИН чат (группу). 0 —
+    # выключено. Чаты с флагом cooldown_exempt не ограничиваются.
+    chat_reply_cooldown_seconds: int = Field(
+        default=300, ge=0, alias="CHAT_REPLY_COOLDOWN_SECONDS"
+    )
     max_consecutive_ai_replies: int = Field(default=3, ge=1, alias="MAX_CONSECUTIVE_AI_REPLIES")
     summary_every_n_messages: int = Field(default=15, ge=1, alias="SUMMARY_EVERY_N_MESSAGES")
     duplicate_window_seconds: int = Field(default=86400, ge=1, alias="DUPLICATE_WINDOW_SECONDS")

@@ -200,6 +200,7 @@ class ScenarioOut(ORMModel):
     min_confidence: float | None
     review_when_uncertain: bool
     review_min_confidence: float | None
+    one_shot: bool
     enabled: bool
 
 
@@ -224,6 +225,7 @@ class ScenarioCreate(BaseModel):
     min_confidence: float | None = Field(default=None, ge=0, le=1)
     review_when_uncertain: bool = False
     review_min_confidence: float | None = Field(default=None, ge=0, le=1)
+    one_shot: bool = False
     enabled: bool = True
 
 
@@ -400,6 +402,8 @@ class ThreadOut(BaseModel):
     lead_status: LeadStatus | None = None
     # Групповой чат: включён ли режим «общение ИИ» (бот отвечает по решению ИИ).
     ai_chat: bool = False
+    # Чат без анти-бан лимита на частоту ответов.
+    cooldown_exempt: bool = False
 
 
 # --- воркеры и сводка ------------------------------------------------------
