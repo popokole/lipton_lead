@@ -17,6 +17,7 @@ from app.api.v1 import (
     notify,
     persona,
     proxies,
+    reviews,
     stoplist,
     system,
 )
@@ -34,6 +35,7 @@ api_router.include_router(persona.router)
 api_router.include_router(stoplist.router)
 api_router.include_router(abtest.router)
 api_router.include_router(knowledge.router)
+api_router.include_router(reviews.router)
 api_router.include_router(proxies.router)
 api_router.include_router(catalog.chats_router)
 api_router.include_router(catalog.scenarios_router)

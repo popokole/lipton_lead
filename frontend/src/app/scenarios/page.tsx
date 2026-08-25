@@ -38,14 +38,50 @@ export default function ScenariosPage() {
   const knowledgeBases = useApi<{ id: string; name: string }[]>('/knowledge', 30_000);
   const [kbId, setKbId] = useState('');
   const [oneShot, setOneShot] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function create() {
+  function resetForm() {
+    setEditingId(null);
+    setName('');
+    setPrompt(SAMPLE_PROMPT);
+    setMaxLength('500');
+    setFallback('');
+    setGrounding(false);
+    setHandoff(false);
+    setReplyInDm(false);
+    setGroupAck('Отправлю в лс 🙂');
+    setLeadCriteria('');
+    setReviewUncertain(false);
+    setReviewMin('0.4');
+    setKbId('');
+    setOneShot(false);
+  }
+
+  function startEdit(s: Scenario) {
+    setEditingId(s.id);
+    setName(s.name);
+    setPrompt(s.system_prompt);
+    setMaxLength(s.max_reply_length ? String(s.max_reply_length) : '');
+    setFallback(s.fallback_text ?? '');
+    setGrounding(s.require_knowledge_grounding);
+    setHandoff(s.human_handoff_enabled ?? false);
+    setReplyInDm(s.reply_in_dm ?? false);
+    setGroupAck(s.group_ack_text ?? '');
+    setLeadCriteria(s.lead_criteria ?? '');
+    setReviewUncertain(s.review_when_uncertain ?? false);
+    setReviewMin(s.review_min_confidence != null ? String(s.review_min_confidence) : '0.4');
+    setKbId(s.knowledge_base_id ?? '');
+    setOneShot(s.one_shot ?? false);
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  async function save() {
     setBusy(true);
     setError(null);
     try {
-      await api.post('/scenarios', {
+      const payload = {
         name: name.trim(),
         system_prompt: prompt.trim(),
         max_reply_length: maxLength ? Number(maxLength) : null,
@@ -60,8 +96,13 @@ export default function ScenariosPage() {
         knowledge_base_id: kbId || null,
         one_shot: oneShot,
         context_messages: 15,
-      });
-      setName('');
+      };
+      if (editingId) {
+        await api.patch(`/scenarios/${editingId}`, payload);
+      } else {
+        await api.post('/scenarios', payload);
+      }
+      resetForm();
       await scenarios.reload();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
@@ -84,7 +125,7 @@ export default function ScenariosPage() {
       <PageHeader title="Сценарии" subtitle="Как именно AI формулирует ответ" />
       <ErrorText>{error ?? scenarios.error}</ErrorText>
 
-      <Card title="Новый сценарий" className="mb-6">
+      <Card title={editingId ? 'Изменить сценарий' : 'Новый сценарий'} className="mb-6">
         <div className="grid gap-4 lg:grid-cols-2">
           <Field label="Название">
             <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} />
@@ -206,10 +247,15 @@ export default function ScenariosPage() {
             </Field>
           )}
         </div>
-        <div className="mt-4">
-          <Button onClick={create} disabled={busy || !name.trim() || !prompt.trim()}>
-            {busy ? 'Сохраняем…' : 'Создать сценарий'}
+        <div className="mt-4 flex gap-2">
+          <Button onClick={save} disabled={busy || !name.trim() || !prompt.trim()}>
+            {busy ? 'Сохраняем…' : editingId ? 'Сохранить' : 'Создать сценарий'}
           </Button>
+          {editingId && (
+            <Button variant="ghost" onClick={resetForm} disabled={busy}>
+              Отмена
+            </Button>
+          )}
         </div>
       </Card>
 
@@ -233,9 +279,14 @@ export default function ScenariosPage() {
                   {scenario.enabled ? <Badge tone="ok">включён</Badge> : <Badge>выключен</Badge>}
                 </td>
                 <td className="py-3">
-                  <Button variant="danger" onClick={() => remove(scenario)}>
-                    Удалить
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button variant="ghost" onClick={() => startEdit(scenario)}>
+                      Изменить
+                    </Button>
+                    <Button variant="danger" onClick={() => remove(scenario)}>
+                      Удалить
+                    </Button>
+                  </div>
                 </td>
               </tr>
             ))}

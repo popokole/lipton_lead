@@ -93,11 +93,14 @@ export interface Scenario {
   max_reply_length: number | null;
   context_messages: number | null;
   require_knowledge_grounding: boolean;
+  human_handoff_enabled?: boolean;
   reply_in_dm?: boolean;
   group_ack_text?: string | null;
   lead_criteria?: string | null;
   review_when_uncertain?: boolean;
   review_min_confidence?: number | null;
+  one_shot?: boolean;
+  knowledge_base_id?: string | null;
   fallback_text: string | null;
   enabled: boolean;
 }

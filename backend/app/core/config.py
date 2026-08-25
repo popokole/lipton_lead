@@ -157,6 +157,8 @@ class Settings(BaseSettings):
     anti_duplicate_ttl_seconds: int = Field(
         default=21600, ge=0, alias="ANTI_DUPLICATE_TTL_SECONDS"
     )
+    # Час (в work_hours_tz_offset), когда бот шлёт дневной дайджест в лог-чат.
+    digest_hour: int = Field(default=21, ge=0, le=23, alias="DIGEST_HOUR")
     summary_every_n_messages: int = Field(default=15, ge=1, alias="SUMMARY_EVERY_N_MESSAGES")
     duplicate_window_seconds: int = Field(default=86400, ge=1, alias="DUPLICATE_WINDOW_SECONDS")
 

@@ -10,6 +10,7 @@ import type { CurrentUser } from '@/lib/types';
 const NAV = [
   { href: '/', label: 'Дашборд' },
   { href: '/handoff', label: 'Требует внимания' },
+  { href: '/reviews', label: 'На подтверждение' },
   { href: '/accounts', label: 'Аккаунты' },
   { href: '/chats', label: 'Чаты' },
   { href: '/tree', label: 'Дерево чатов' },

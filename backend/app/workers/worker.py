@@ -127,6 +127,8 @@ class Worker:
             asyncio.create_task(self._poll_loop(), name="worker-poll"),
             asyncio.create_task(self._command_loop(), name="worker-commands"),
             asyncio.create_task(self._review_poll_loop(), name="worker-review"),
+            asyncio.create_task(self._approved_review_loop(), name="worker-review-exec"),
+            asyncio.create_task(self._digest_loop(), name="worker-digest"),
         ]
         self.set_status(STATUS_HEALTHY)
         await self._sync_status_to_db()
@@ -515,6 +517,118 @@ class Worker:
                 scenario_id=review.scenario_id,
             )
         return True, "ok"
+
+    async def _approved_review_loop(self) -> None:
+        """Отправляет заявки ревью, одобренные из панели (status=approved)."""
+        while not self._stop.is_set():
+            try:
+                await self._process_one_approved_review()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — не роняем цикл
+                logger.warning("approved_review_loop_failed", detail=str(exc)[:150])
+            await self._sleep(4)
+
+    async def _process_one_approved_review(self) -> None:
+        from sqlalchemy import select
+
+        from app.core.clock import utcnow
+        from app.models import PendingReview
+
+        async with self.runtime.database.session() as db:
+            review = await db.scalar(
+                select(PendingReview).where(PendingReview.status == "approved").limit(1)
+            )
+            if review is None:
+                return
+            message_id = review.notify_message_id
+            ok, detail = await self._execute_review(db, review)
+            review.status = "sent" if ok else "failed"
+            review.decided_at = utcnow()
+            if not ok:
+                logger.warning("approved_review_send_failed", detail=detail)
+            loaded = await self._notifier.load_token(db)
+            if loaded and message_id:
+                token, group_id = loaded
+                note = "✅ Отправлено из панели" if ok else f"⚠️ Не удалось: {detail[:80]}"
+                await self._notifier.finalize_review_card(token, group_id, message_id, note)
+
+    async def _digest_loop(self) -> None:
+        """Раз в день шлёт сводку по лидам в лог-чат (в digest_hour)."""
+        while not self._stop.is_set():
+            try:
+                await self._maybe_send_digest()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — дайджест не критичнее работы
+                logger.warning("digest_loop_failed", detail=str(exc)[:150])
+            await self._sleep(300)
+
+    async def _maybe_send_digest(self) -> None:
+        from datetime import timedelta
+
+        from app.core.clock import utcnow
+
+        settings = self.runtime.settings
+        now_local = utcnow() + timedelta(hours=settings.work_hours_tz_offset)
+        if now_local.hour != settings.digest_hour:
+            return
+        day = now_local.strftime("%Y-%m-%d")
+        redis = self.runtime.redis.client
+        # Один дайджест в день: атомарный захват ключа на ~25 часов.
+        if not await redis.set(f"digest:sent:{day}", "1", nx=True, ex=90000):
+            return
+        text = await self._build_digest(now_local)
+        async with self.runtime.database.session() as db:
+            await self._notifier.notify_digest(db, text)
+        logger.info("digest_sent", day=day)
+
+    async def _build_digest(self, now_local: Any) -> str:
+        from datetime import timedelta
+
+        from sqlalchemy import func, select
+
+        from app.models import Lead, Message, PendingReview, Scenario
+
+        offset = self.runtime.settings.work_hours_tz_offset
+        midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_utc = midnight - timedelta(hours=offset)
+
+        async with self.runtime.database.session() as db:
+            total = await db.scalar(
+                select(func.count()).select_from(Lead).where(Lead.created_at >= start_utc)
+            )
+            by_scn = (
+                await db.execute(
+                    select(Scenario.name, func.count())
+                    .select_from(Lead)
+                    .outerjoin(Scenario, Scenario.id == Lead.scenario_id)
+                    .where(Lead.created_at >= start_utc)
+                    .group_by(Scenario.name)
+                    .order_by(func.count().desc())
+                )
+            ).all()
+            replies = await db.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.is_bot_reply.is_(True), Message.created_at >= start_utc)
+            )
+            pending = await db.scalar(
+                select(func.count())
+                .select_from(PendingReview)
+                .where(PendingReview.status == "pending")
+            )
+
+        lines = [
+            f"📊 <b>Дайджест</b> · {now_local.strftime('%d.%m.%Y')}",
+            f"🎯 Лидов за день: {int(total or 0)}",
+        ]
+        for name, count in by_scn:
+            lines.append(f"  • {name or 'без сценария'}: {count}")
+        lines.append(f"✉️ Ответов отправлено: {int(replies or 0)}")
+        if pending:
+            lines.append(f"🟡 Ждут подтверждения: {int(pending)}")
+        return "\n".join(lines)
 
     async def _refresh_own_ids(self) -> None:
         """Обновляет реестр своих id (анти-самоответ) и стоп-лист."""

@@ -115,6 +115,12 @@ class NotifierBot:
                 )
                 row.review_topic_id = int(topic["message_thread_id"])
                 created += 1
+            if row.digest_topic_id is None:
+                topic = await self._call(
+                    token, "createForumTopic", chat_id=group_id, name="Дайджест"
+                )
+                row.digest_topic_id = int(topic["message_thread_id"])
+                created += 1
 
         await db.flush()
         return {
@@ -245,6 +251,36 @@ class NotifierBot:
             await db.flush()
         except Exception as exc:  # noqa: BLE001 — уведомление не критично
             logger.warning("send_review_failed", detail=str(exc)[:200])
+
+    async def notify_digest(self, db: AsyncSession, text: str) -> None:
+        """Шлёт дневную сводку в топик «Дайджест» (создаёт лениво)."""
+        try:
+            settings = await self._load_settings(db)
+            if settings is None:
+                return
+            token, group_id = settings
+            row = await db.get(NotifySettings, SINGLETON_ID)
+            if row is None:
+                return
+            thread_id = row.digest_topic_id
+            if thread_id is None:
+                topic = await self._call(
+                    token, "createForumTopic", chat_id=group_id, name="Дайджест"
+                )
+                thread_id = int(topic["message_thread_id"])
+                row.digest_topic_id = thread_id
+                await db.flush()
+            await self._call(
+                token,
+                "sendMessage",
+                chat_id=group_id,
+                message_thread_id=thread_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — дайджест не критичнее работы
+            logger.warning("notify_digest_failed", detail=str(exc)[:200])
 
     async def load_token(self, db: AsyncSession) -> tuple[str, int] | None:
         """Токен и id группы для опроса нажатий (или None, если не настроено)."""
