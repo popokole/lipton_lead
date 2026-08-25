@@ -94,6 +94,29 @@ class SelfGuard:
         return FilterVerdict.ok()
 
 
+class StopGuard:
+    """Стоп-лист: отправители, которым никогда не отвечаем.
+
+    Как и SelfGuard — проверка на горячем пути, поэтому набор держится в памяти
+    и обновляется пачкой. Блокировка по tg-id или по @username.
+    """
+
+    def __init__(self) -> None:
+        self._ids: set[int] = set()
+        self._usernames: set[str] = set()
+
+    def update(self, tg_ids: Iterable[int], usernames: Iterable[str]) -> None:
+        self._ids = set(tg_ids)
+        self._usernames = {u.lstrip("@").lower() for u in usernames if u}
+
+    def blocked(self, message: NormalizedMessage) -> bool:
+        if message.sender_tg_id is not None and message.sender_tg_id in self._ids:
+            return True
+        if message.sender_username and message.sender_username.lstrip("@").lower() in self._usernames:
+            return True
+        return False
+
+
 def check_message(message: NormalizedMessage, spec: MessageFilterSpec) -> FilterVerdict:
     """Применяет условия правила к сообщению."""
     if spec.incoming_only and not message.is_incoming:

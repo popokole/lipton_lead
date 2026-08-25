@@ -34,7 +34,7 @@ from app.database.session import Database
 from app.models import EventType, ProcessedStatus, RuleScope
 from app.pipeline.reply_pipeline import ReplyOutcome, ReplyPipeline
 from app.rules.engine import RuleEngine, RuleMatch
-from app.rules.filters import SelfGuard
+from app.rules.filters import SelfGuard, StopGuard
 from app.telegram.messages import MessageNormalizer, NormalizedMessage
 from app.telegram.peers import PeerCache, extract_input_peer, extract_input_sender
 
@@ -76,11 +76,13 @@ class MonitorPipeline:
         publisher: EventPublisher,
         reply_pipeline: ReplyPipeline | None = None,
         peers: PeerCache | None = None,
+        stop_guard: StopGuard | None = None,
     ) -> None:
         self._settings = settings
         self._database = database
         self._rules = rules
         self._self_guard = self_guard
+        self._stop_guard = stop_guard or StopGuard()
         self._publisher = publisher
         # Без ReplyPipeline система работает как монитор: правила срабатывают,
         # события пишутся, но ответы не отправляются.
@@ -179,12 +181,16 @@ class MonitorPipeline:
         # простоя нельзя — это выглядит как спам и грозит баном.
         age_seconds = (utcnow() - message.date).total_seconds()
         fresh = age_seconds <= REPLY_MAX_AGE_SECONDS
+        # Стоп-лист: сообщение сохранено, но отвечать этому отправителю нельзя.
+        blocked = self._stop_guard.blocked(message)
         # Ответы — только в личке и в отслеживаемых чатах. В остальных сообщение
         # прочитано и сохранено, но правила не запускаются.
-        if fresh and (message.is_private or chat_monitored):
+        if fresh and not blocked and (message.is_private or chat_monitored):
             matches = await self._rules.match_all(message, chat_id=chat_id, scope=scope)
         else:
-            if not fresh:
+            if blocked:
+                logger.info("stoplisted_sender_skipped", **message.for_log())
+            elif not fresh:
                 logger.info(
                     "stale_message_stored_no_reply",
                     age_seconds=int(age_seconds),

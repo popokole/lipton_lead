@@ -53,7 +53,7 @@ from app.notifications.notifier import NotifierBot
 from app.pipeline.monitor_pipeline import MonitorPipeline
 from app.pipeline.reply_pipeline import ReplyPipeline
 from app.rules.engine import RuleEngine
-from app.rules.filters import SelfGuard
+from app.rules.filters import SelfGuard, StopGuard
 from app.telegram.account_manager import AccountManager
 from app.telegram.auth_flow import AuthFlow
 from app.telegram.client import TelethonClientFactory
@@ -96,6 +96,7 @@ class Worker:
         self._factory = TelethonClientFactory(settings)
         self._auth = AuthFlow(settings, self._factory)
         self._self_guard = SelfGuard()
+        self._stop_guard = StopGuard()
         self._rules = RuleEngine(
             self.runtime.database, default_user_cooldown=settings.default_cooldown_seconds
         )
@@ -164,6 +165,7 @@ class Worker:
             publisher,
             reply_pipeline=self._build_reply_pipeline(publisher, redis),
             peers=self._peers,
+            stop_guard=self._stop_guard,
         )
         self._commands = CommandConsumer(redis, str(self.worker_id))
         self._handler = CommandHandler(
@@ -515,14 +517,23 @@ class Worker:
         return True, "ok"
 
     async def _refresh_own_ids(self) -> None:
-        """Обновляет реестр собственных Telegram-id (защита от самоответа)."""
+        """Обновляет реестр своих id (анти-самоответ) и стоп-лист."""
         try:
             async with self.runtime.database.session() as db:
                 own_ids = await AccountRepository(db).own_telegram_ids()
+                from sqlalchemy import select
+
+                from app.models import StopEntry
+
+                rows = (await db.execute(select(StopEntry.tg_user_id, StopEntry.username))).all()
         except Exception as exc:  # noqa: BLE001 — реестр обновится на следующем круге
             logger.warning("own_ids_refresh_failed", detail=str(exc))
             return
         self._self_guard.update(own_ids)
+        self._stop_guard.update(
+            (r.tg_user_id for r in rows if r.tg_user_id is not None),
+            (r.username for r in rows if r.username),
+        )
 
     async def _sync_status_to_db(self) -> None:
         """Переносит статус в PostgreSQL, если он изменился."""
