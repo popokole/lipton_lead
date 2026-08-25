@@ -242,6 +242,8 @@ class ReplyPipeline:
         # Исключение здесь нельзя пускать наверх — сообщение просто исчезнет из
         # виду: ни ответа, ни отметки в панели. Обрабатываем так же, как пустой
         # ответ модели: подставляем заготовленный текст или зовём человека.
+        knowledge = await self._retrieve_knowledge(scenario, message.text)
+
         generation = None
         generation_error: str | None = None
         try:
@@ -249,7 +251,7 @@ class ReplyPipeline:
                 _scenario_settings(scenario),
                 message_text=message.text,
                 context=context.history,
-                knowledge=[],
+                knowledge=knowledge,
                 memory=context.memory,
                 conversation_summary=context.summary,
                 account_id=message.account_id,
@@ -579,6 +581,21 @@ class ReplyPipeline:
             return None
         async with self._database.session() as db:
             return await RuleRepository(db).get_scenario(scenario_id)
+
+    async def _retrieve_knowledge(self, scenario: Scenario, query: str) -> list[str]:
+        """Топ релевантных кусков базы знаний сценария (пусто — если не задана)."""
+        if scenario.knowledge_base_id is None:
+            return []
+        from app.database.repositories.knowledge import KnowledgeRepository
+
+        try:
+            async with self._database.session() as db:
+                return await KnowledgeRepository(db).retrieve(
+                    scenario.knowledge_base_id, query, limit=5
+                )
+        except Exception as exc:  # noqa: BLE001 — без базы знаний ответим и так
+            logger.warning("knowledge_retrieve_failed", detail=str(exc)[:150])
+            return []
 
     async def _pick_ab_variant(
         self, scenario_id: uuid.UUID, account_id: uuid.UUID, peer_tg_id: int | None

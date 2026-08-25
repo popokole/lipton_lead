@@ -35,6 +35,8 @@ export default function ScenariosPage() {
   const [leadCriteria, setLeadCriteria] = useState('');
   const [reviewUncertain, setReviewUncertain] = useState(false);
   const [reviewMin, setReviewMin] = useState('0.4');
+  const knowledgeBases = useApi<{ id: string; name: string }[]>('/knowledge', 30_000);
+  const [kbId, setKbId] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -54,6 +56,7 @@ export default function ScenariosPage() {
         lead_criteria: leadCriteria.trim() || null,
         review_when_uncertain: reviewUncertain,
         review_min_confidence: reviewUncertain && reviewMin ? Number(reviewMin) : null,
+        knowledge_base_id: kbId || null,
         context_messages: 15,
       });
       setName('');
@@ -109,6 +112,16 @@ export default function ScenariosPage() {
               value={fallback}
               onChange={(e) => setFallback(e.target.value)}
             />
+          </Field>
+          <Field label="База знаний" hint="ИИ будет отвечать по её материалам (цены, FAQ). Пусто — без базы">
+            <select className={inputClass} value={kbId} onChange={(e) => setKbId(e.target.value)}>
+              <option value="">— не привязывать —</option>
+              {knowledgeBases.data?.map((kb) => (
+                <option key={kb.id} value={kb.id}>
+                  {kb.name}
+                </option>
+              ))}
+            </select>
           </Field>
           <label className="flex items-end gap-2 pb-2 text-sm text-slate-400">
             <input

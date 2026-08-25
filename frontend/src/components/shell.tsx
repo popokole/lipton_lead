@@ -15,6 +15,7 @@ const NAV = [
   { href: '/tree', label: 'Дерево чатов' },
   { href: '/scenarios', label: 'Сценарии' },
   { href: '/abtest', label: 'A/B заходов' },
+  { href: '/knowledge', label: 'База знаний' },
   { href: '/rules', label: 'Правила' },
   { href: '/stoplist', label: 'Стоп-лист' },
   { href: '/messages', label: 'Сообщения' },

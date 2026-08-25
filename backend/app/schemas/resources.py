@@ -215,6 +215,7 @@ class ScenarioCreate(BaseModel):
     tone: str | None = Field(default=None, max_length=64)
     max_reply_length: int | None = Field(default=None, ge=1)
     context_messages: int | None = Field(default=None, ge=1)
+    knowledge_base_id: uuid.UUID | None = None
     require_knowledge_grounding: bool = False
     fallback_text: str | None = None
     human_handoff_enabled: bool = True

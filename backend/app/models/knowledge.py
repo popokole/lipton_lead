@@ -90,7 +90,9 @@ class KnowledgeChunk(UUIDPrimaryKeyMixin, Base):
     ord: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     content: Mapped[str] = mapped_column(sa.Text, nullable=False)
     tokens: Mapped[int | None] = mapped_column(sa.Integer)
-    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM), nullable=False)
+    # Эмбеддинг опционален: провайдер (codex.sale) их не даёт, поэтому поиск
+    # идёт по полнотексту (FTS). Колонка остаётся для будущего вектор-поиска.
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
 
     __table_args__ = (
         sa.UniqueConstraint("document_id", "ord", name="uq_knowledge_chunks_document_id_ord"),
