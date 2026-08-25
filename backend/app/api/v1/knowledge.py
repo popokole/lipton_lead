@@ -14,7 +14,6 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
 from app.api.deps import CurrentUser, DbDep, OperatorUser
-from app.core.errors import NotFoundError
 from app.database.repositories.knowledge import KnowledgeRepository
 from app.schemas.common import Ok
 
