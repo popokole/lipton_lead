@@ -219,6 +219,25 @@ class ReplyPipeline:
             context_messages=scenario.context_messages,
         )
 
+        # A/B заходов: первый ответ новому лиду берём из варианта-захода, а не из
+        # ИИ, чтобы честно сравнить конверсию. Дальше диалог ведёт ИИ.
+        ab = await self._pick_ab_variant(scenario.id, message.account_id, message.sender_tg_id)
+        if ab is not None and not review_mode:
+            ab_id, ab_text = ab
+            return await self._send(
+                message,
+                match,
+                chat_id,
+                message_id,
+                context,
+                scenario,
+                text=ab_text,
+                used_knowledge=False,
+                cooldown_keys=cooldown_keys,
+                analysis=analysis,
+                ab_variant_id=ab_id,
+            )
+
         # Провайдер может отказать: перегрузка агрегатора, таймаут, обрыв сети.
         # Исключение здесь нельзя пускать наверх — сообщение просто исчезнет из
         # виду: ни ответа, ни отметки в панели. Обрабатываем так же, как пустой
@@ -330,6 +349,7 @@ class ReplyPipeline:
         cooldown_keys: CooldownKeys,
         analysis: AnalysisOutcome | None,
         review: bool = False,
+        ab_variant_id: uuid.UUID | None = None,
     ) -> ReplyOutcome:
         verdict = self._validator.validate(
             ValidationContext(
@@ -419,6 +439,8 @@ class ReplyPipeline:
         action_payload: dict[str, object] = {"lead_score": lead_score, "intent": intent}
         if dm_text:
             action_payload["dm_text"] = dm_text
+        if ab_variant_id is not None:
+            action_payload["ab_variant_id"] = str(ab_variant_id)
 
         result = await self._actions.dispatch(
             ActionRequest(
@@ -557,6 +579,39 @@ class ReplyPipeline:
             return None
         async with self._database.session() as db:
             return await RuleRepository(db).get_scenario(scenario_id)
+
+    async def _pick_ab_variant(
+        self, scenario_id: uuid.UUID, account_id: uuid.UUID, peer_tg_id: int | None
+    ) -> tuple[uuid.UUID, str] | None:
+        """Вариант-заход для ПЕРВОГО контакта, если у сценария включён A/B.
+
+        Первый контакт = лида по этому собеседнику ещё нет (он заводится на
+        первом ответе). Берём реже всего отправленный включённый вариант, чтобы
+        показы распределялись ровно. Инкремент счётчика — при реальной отправке.
+        """
+        if peer_tg_id is None:
+            return None
+        from sqlalchemy import select
+
+        from app.models import AbVariant, Lead
+
+        async with self._database.session() as db:
+            already_lead = await db.scalar(
+                select(Lead.id).where(
+                    Lead.account_id == account_id, Lead.tg_user_id == peer_tg_id
+                )
+            )
+            if already_lead is not None:
+                return None
+            variant = await db.scalar(
+                select(AbVariant)
+                .where(AbVariant.scenario_id == scenario_id, AbVariant.enabled.is_(True))
+                .order_by(AbVariant.sent_count.asc(), AbVariant.created_at.asc())
+                .limit(1)
+            )
+            if variant is None:
+                return None
+            return variant.id, variant.text
 
 
 def _scenario_settings(scenario: Scenario) -> ScenarioSettings:

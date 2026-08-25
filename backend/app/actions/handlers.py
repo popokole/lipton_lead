@@ -195,6 +195,18 @@ class ReplyHandler:
                 await ChatRepository(db).touch(dm_chat.id)
             if request.conversation_id is not None:
                 await ConversationRepository(db).register_reply(request.conversation_id)
+            # A/B заходов: помечаем, каким вариантом зашли, и считаем отправку.
+            ab_id = request.payload.get("ab_variant_id")
+            if ab_id:
+                from app.models import AbVariant, Conversation
+
+                variant = await db.get(AbVariant, uuid.UUID(str(ab_id)))
+                if variant is not None:
+                    variant.sent_count += 1
+                if request.conversation_id is not None:
+                    conv = await db.get(Conversation, request.conversation_id)
+                    if conv is not None:
+                        conv.ab_variant_id = uuid.UUID(str(ab_id))
             await EventLogRepository(db).add(
                 LogEventType.ACTION_SENT,
                 account_id=request.account_id,

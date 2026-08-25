@@ -40,6 +40,11 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     summary_upto_message_id: Mapped[int | None] = mapped_column(TelegramId)
     summary_updated_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
 
+    # A/B заходов: какой вариант-захода отправлен этому собеседнику первым и
+    # засчитан ли уже его ответ (чтобы не увеличить reply_count дважды).
+    ab_variant_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True))
+    ab_reply_counted: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
+
     message_count: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
     # Сколько ответов AI подряд без реплики собеседника. Счётчик обнуляется его
     # сообщением и ограничивает петлю «сам себе отвечаю» (ТЗ §9).

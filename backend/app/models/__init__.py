@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from app.models.abtest import AbVariant
 from app.models.account import Account, Proxy, TelegramSession
 from app.models.action import Action, ActionLog
 from app.models.chat import Chat
@@ -49,6 +50,7 @@ __all__ = [
     "EMBEDDING_DIM",
     "AIPurpose",
     "AIRequest",
+    "AbVariant",
     "Account",
     "AccountStatus",
     "Action",

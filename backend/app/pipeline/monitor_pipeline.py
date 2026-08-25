@@ -90,6 +90,29 @@ class MonitorPipeline:
         self._normalizer = MessageNormalizer(settings.max_message_length)
         self.peers = peers or PeerCache()
 
+    async def _credit_ab_reply(self, account_id: uuid.UUID, peer_tg_id: int) -> None:
+        """Засчитывает ответ собеседника варианту-заходу A/B (один раз на диалог)."""
+        from sqlalchemy import select
+
+        from app.models import AbVariant, Conversation
+
+        try:
+            async with self._database.session() as db:
+                conv = await db.scalar(
+                    select(Conversation).where(
+                        Conversation.account_id == account_id,
+                        Conversation.peer_tg_id == peer_tg_id,
+                    )
+                )
+                if conv is None or conv.ab_variant_id is None or conv.ab_reply_counted:
+                    return
+                variant = await db.get(AbVariant, conv.ab_variant_id)
+                if variant is not None:
+                    variant.reply_count += 1
+                conv.ab_reply_counted = True
+        except Exception as exc:  # noqa: BLE001 — учёт A/B не критичнее обработки
+            logger.warning("ab_credit_failed", detail=str(exc)[:150])
+
     async def handle_event(self, account_id: uuid.UUID, event: Any) -> PipelineOutcome:
         """Точка входа для обработчика Telethon."""
         started = get_clock().monotonic()
@@ -160,6 +183,11 @@ class MonitorPipeline:
             message_id = row.id
             chat_id = chat.id
             chat_monitored = chat.monitored
+
+        # A/B: собеседник написал в личку — если ему уходил вариант-заход и его
+        # ответ ещё не засчитан, кредитуем конверсию этого захода.
+        if message.is_private and message.is_incoming and message.sender_tg_id is not None:
+            await self._credit_ab_reply(message.account_id, message.sender_tg_id)
 
         await self._publisher.publish(
             Event(
