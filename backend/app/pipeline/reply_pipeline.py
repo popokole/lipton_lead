@@ -127,20 +127,28 @@ class ReplyPipeline:
                 message, match, chat_id, message_id, f"cooldown: {early.blocked_by}"
             )
 
+        # Флаги чата: тест-чат снимает все ограничения (можно тестить всегда),
+        # cooldown_exempt — только анти-бан лимит.
+        cooldown_exempt, test_mode = await self._chat_flags(chat_id)
+
         # Анти-бан: не чаще раза в N минут в один чат (группу). Личку не трогаем
-        # (там свой one_shot/логика), чаты с cooldown_exempt — без лимита.
-        # Занимаем ключ здесь, до AI, чтобы не тратить генерацию впустую.
+        # (там свой one_shot/логика), тест-чаты и cooldown_exempt — без лимита.
         chat_cd = self._settings.chat_reply_cooldown_seconds
-        if chat_cd > 0 and not message.is_private and not await self._chat_cooldown_exempt(chat_id):
+        if (
+            chat_cd > 0
+            and not test_mode
+            and not cooldown_exempt
+            and not message.is_private
+        ):
             key = f"chatcd:{message.account_id}:{message.tg_chat_id}"
             if not await self._cooldown.claim_once(key, chat_cd):
                 return await self._ignore(
                     message, match, chat_id, message_id, "анти-бан: лимит на чат"
                 )
 
-        # По-человечески: ночью не отвечаем (вне рабочих часов). Сообщение
-        # сохранено, ответа нет — как живой человек, который спит.
-        if not self._within_work_hours():
+        # По-человечески: ночью не отвечаем (вне рабочих часов). В тест-чате
+        # отвечаем в любое время.
+        if not test_mode and not self._within_work_hours():
             return await self._ignore(
                 message, match, chat_id, message_id, "вне рабочих часов"
             )
@@ -233,6 +241,7 @@ class ReplyPipeline:
         # пишем (одно первое сообщение с контактом и всё).
         if (
             scenario.one_shot
+            and not test_mode
             and message.sender_tg_id is not None
             and await self._already_contacted(message.account_id, message.sender_tg_id)
         ):
@@ -650,15 +659,23 @@ class ReplyPipeline:
         await self._cooldown.claim_once(f"dup:{account_id}:{vdigest}", ttl)
         return varied
 
-    async def _chat_cooldown_exempt(self, chat_id: uuid.UUID | None) -> bool:
+    async def _chat_flags(self, chat_id: uuid.UUID | None) -> tuple[bool, bool]:
+        """(cooldown_exempt, test_mode) чата за один запрос."""
         if chat_id is None:
-            return False
+            return False, False
         from sqlalchemy import select
 
         from app.models import Chat
 
         async with self._database.session() as db:
-            return bool(await db.scalar(select(Chat.cooldown_exempt).where(Chat.id == chat_id)))
+            row = (
+                await db.execute(
+                    select(Chat.cooldown_exempt, Chat.test_mode).where(Chat.id == chat_id)
+                )
+            ).first()
+        if row is None:
+            return False, False
+        return bool(row.cooldown_exempt), bool(row.test_mode)
 
     async def _already_contacted(self, account_id: uuid.UUID, peer_tg_id: int) -> bool:
         """Отвечали ли этому собеседнику раньше (лид заводится на первом ответе)."""

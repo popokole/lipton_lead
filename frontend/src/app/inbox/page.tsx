@@ -179,6 +179,15 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
     }
   };
 
+  const toggleTestMode = async () => {
+    try {
+      await api.post(`/conversations/${thread.chat_id}/test-mode`, { enabled: !thread.test_mode });
+      onSent();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    }
+  };
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [messages.data]);
@@ -221,6 +230,17 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
           {thread.kind === 'dm' && thread.lead_score != null && (
             <Badge tone="info">лид {thread.lead_score}</Badge>
           )}
+          <button
+            onClick={() => void toggleTestMode()}
+            title="Тест-чат: отвечаем всегда, без one_shot / лимита / рабочих часов"
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+              thread.test_mode
+                ? 'bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30'
+                : 'border border-ink-600 text-slate-400 hover:bg-ink-800'
+            }`}
+          >
+            {thread.test_mode ? '🧪 тест-чат' : '🧪 тест'}
+          </button>
           {thread.kind === 'group' && (
             <button
               onClick={() => void toggleAiChat()}

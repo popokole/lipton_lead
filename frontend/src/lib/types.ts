@@ -217,6 +217,7 @@ export interface Thread {
   lead_status: string | null;
   ai_chat: boolean;
   cooldown_exempt: boolean;
+  test_mode: boolean;
 }
 
 export interface Conversation {

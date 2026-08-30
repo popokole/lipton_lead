@@ -404,6 +404,8 @@ class ThreadOut(BaseModel):
     ai_chat: bool = False
     # Чат без анти-бан лимита на частоту ответов.
     cooldown_exempt: bool = False
+    # Тест-чат: без ограничений (one_shot/лимит/расписание).
+    test_mode: bool = False
 
 
 # --- воркеры и сводка ------------------------------------------------------
