@@ -407,6 +407,10 @@ def format_lead_card(
     reply_text: str,
     score: int,
     status: str,
+    is_private: bool = False,
+    chat_username: str | None = None,
+    tg_chat_id: int | None = None,
+    tg_message_id: int | None = None,
 ) -> str:
     """Карточка лида для топика: кто, откуда, текст, наш ответ, ссылка."""
     who = sender_name or (f"@{sender_username}" if sender_username else str(sender_tg_id or "?"))
@@ -415,11 +419,21 @@ def format_lead_card(
         if sender_username
         else (f'<a href="tg://user?id={sender_tg_id}">написать</a>' if sender_tg_id else "—")
     )
-    where = chat_title or "личка"
+    # Источник: личку зовём личкой; для группы — реальное имя/@username чата,
+    # а не «личка» по умолчанию (иначе группы без названия ошибочно шли как личка).
+    if is_private:
+        where = "личка"
+    else:
+        where = chat_title or (f"@{chat_username}" if chat_username else "группа")
+    where_line = f"💬 из: {_esc(where)}"
+    msg_link = None if is_private else message_link(tg_chat_id, tg_message_id, chat_username)
+    if msg_link:
+        where_line += f' · <a href="{msg_link}">сообщение</a>'
+    where_line += f" · аккаунт {_esc(account_label)}"
     return (
         f"🎯 <b>Лид</b> · {status} ({score})\n"
         f"👤 {_esc(who)} · {link}\n"
-        f"💬 из: {_esc(where)} · аккаунт {_esc(account_label)}\n\n"
+        f"{where_line}\n\n"
         f"<b>Сообщение:</b>\n{_esc(incoming_text[:400])}\n\n"
         f"<b>Наш ответ:</b>\n{_esc(reply_text[:400])}"
     )
