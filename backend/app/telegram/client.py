@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Protocol
 
 from app.core.config import Settings
@@ -51,6 +51,12 @@ class TelegramClientLike(Protocol):
         ...
 
     async def get_dialogs(self, limit: int | None = None) -> Any: ...
+
+    def iter_messages(
+        self, entity: Any, *, limit: int | None = None
+    ) -> AsyncIterator[Any]:
+        """Обычная выгрузка истории (не pts-дельта) — см. app/pipeline/reconcile.py."""
+        ...
 
     async def get_entity(self, entity: Any) -> Any: ...
 

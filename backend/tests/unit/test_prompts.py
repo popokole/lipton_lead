@@ -7,9 +7,9 @@ from app.ai.provider import GenerateRequest
 
 
 def _request(**kwargs: object) -> GenerateRequest:
-    base = {"system_prompt": "Ты менеджер.", "message_text": "привет"}
+    base: dict[str, object] = {"system_prompt": "Ты менеджер.", "message_text": "привет"}
     base.update(kwargs)
-    return GenerateRequest(**base)  # type: ignore[arg-type]
+    return GenerateRequest(**base)
 
 
 class TestRecentRepliesInPrompt:

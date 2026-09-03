@@ -138,11 +138,17 @@ async def env(integration_settings: Settings, redis_client: Redis) -> AsyncItera
         await db.flush()
         account_id, chat_id = account.id, chat.id
 
-    yield Env(database=database, redis_client=redis_client, account_id=account_id, chat_id=chat_id)
-
-    async with database.session() as db:
-        await db.execute(delete(Account).where(Account.id == account_id))
-    await database.disconnect()
+    # try/finally: без него исключение из теста прокидывается в генератор
+    # прямо на yield и пропускает очистку — упавший тест насовсем оставляет
+    # Account в общей базе.
+    try:
+        yield Env(
+            database=database, redis_client=redis_client, account_id=account_id, chat_id=chat_id
+        )
+    finally:
+        async with database.session() as db:
+            await db.execute(delete(Account).where(Account.id == account_id))
+        await database.disconnect()
 
 
 async def _run(

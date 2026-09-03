@@ -8,13 +8,13 @@ from datetime import UTC, datetime
 import pytest
 
 from app.models import ChatType, MediaType
-from app.telegram.messages import MessageNormalizer
+from app.telegram.messages import MessageNormalizer, NormalizedMessage
 from tests.builders import FakeEvent
 
 ACCOUNT = uuid.uuid4()
 
 
-def normalize(event: FakeEvent, max_length: int = 4000):
+def normalize(event: FakeEvent, max_length: int = 4000) -> NormalizedMessage:
     return MessageNormalizer(max_length).normalize(ACCOUNT, event)
 
 

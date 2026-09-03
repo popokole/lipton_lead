@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -91,6 +92,9 @@ class FakeTelegramClient:
     password_required: bool = False
     flood_wait_seconds: int | None = None
     dialogs: list[FakeDialog] = field(default_factory=list)
+    # История для iter_messages (довыгрузка, см. app/pipeline/reconcile.py) —
+    # заполняется тестом напрямую, без привязки к send_message.
+    history: list[Any] = field(default_factory=list)
 
     connected: bool = False
     connect_calls: int = 0
@@ -143,8 +147,23 @@ class FakeTelegramClient:
         self._next_message_id += 1
         return FakeSentMessage(id=self._next_message_id)
 
+    async def catch_up(self) -> None:
+        return None
+
+    async def download_profile_photo(self, entity: Any, *, file: Any = None) -> Any:
+        return None
+
     async def get_dialogs(self, limit: int | None = None) -> list[FakeDialog]:
         return self.dialogs[:limit] if limit else self.dialogs
+
+    def iter_messages(self, entity: Any, *, limit: int | None = None) -> AsyncIterator[Any]:
+        items = self.history[:limit] if limit else list(self.history)
+        return self._iter(items)
+
+    @staticmethod
+    async def _iter(items: list[Any]) -> AsyncIterator[Any]:
+        for item in items:
+            yield item
 
     async def send_read_acknowledge(self, entity: Any, *, max_id: int | None = None) -> None:
         self.read_acknowledged.append((int(entity), max_id))

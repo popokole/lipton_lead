@@ -54,11 +54,12 @@ from app.models import (
     RuleScope,
     Scenario,
 )
-from app.pipeline.monitor_pipeline import MonitorPipeline
+from app.pipeline.monitor_pipeline import MonitorPipeline, PipelineOutcome
 from app.pipeline.reply_pipeline import ReplyPipeline
 from app.rules.engine import RuleEngine
 from app.rules.filters import SelfGuard
 from app.telegram.client_manager import ClientManager
+from app.telegram.peers import PeerCache
 from app.telegram.sender import MessageSender
 from app.telegram.session_manager import SessionCredentials
 from tests.builders import FakeEvent
@@ -103,6 +104,10 @@ async def env(integration_settings: Settings, redis_client: Redis) -> AsyncItera
             "max_consecutive_ai_replies": 3,
             "reply_typing_delay_min_seconds": 0.0,
             "reply_typing_delay_max_seconds": 0.0,
+            # Иначе второе сообщение в тот же тестовый чат словит анти-бан
+            # лимит («раз в 300с на чат») раньше, чем тест доберётся до
+            # проверяемой им логики claim/release кулдауна на пользователя.
+            "chat_reply_cooldown_seconds": 0,
         }
     )
     database = Database(settings)
@@ -163,7 +168,7 @@ async def env(integration_settings: Settings, redis_client: Redis) -> AsyncItera
     actions = ActionEngine(database)
     actions.register(
         ActionType.REPLY,
-        ReplyHandler(database, clients, MessageSender(settings), publisher),  # type: ignore[arg-type]
+        ReplyHandler(database, clients, MessageSender(settings), publisher, PeerCache()),  # type: ignore[arg-type]
     )
     actions.register(ActionType.NOTIFY_ADMIN, NotifyAdminHandler(database, publisher))  # type: ignore[arg-type]
     actions.register(ActionType.SAVE_LEAD, SaveLeadHandler(database, publisher))  # type: ignore[arg-type]
@@ -177,8 +182,8 @@ async def env(integration_settings: Settings, redis_client: Redis) -> AsyncItera
     reply = ReplyPipeline(
         settings,
         database,
-        analyzer=AIAnalyzer(provider, budget, recorder, database),  # type: ignore[arg-type]
-        generator=AIGenerator(provider, budget, recorder, database),  # type: ignore[arg-type]
+        analyzer=AIAnalyzer(provider, budget, recorder, database),
+        generator=AIGenerator(provider, budget, recorder, database),
         context=ContextBuilder(settings, database),
         validator=ReplyValidator(),
         cooldown=CooldownGuard(redis_client),
@@ -193,33 +198,42 @@ async def env(integration_settings: Settings, redis_client: Redis) -> AsyncItera
         reply_pipeline=reply,
     )
 
-    yield Env(
-        pipeline=pipeline,
-        database=database,
-        provider=provider,
-        client=client,
-        publisher=publisher,
-        account_id=account_id,
-        chat_id=chat_id,
-        tg_chat_id=tg_chat_id,
-        rule_id=rule_id,
-        scenario_id=scenario_id,
-        clients=clients,
-    )
+    # try/finally: без него исключение из теста прокидывается в генератор
+    # прямо на yield и пропускает всю очистку ниже — упавший тест насовсем
+    # оставляет в общей базе Account/Rule (см. инцидент 2026-09-03: 16 таких
+    # строк от одного бага в тесте, обнаружены и вычищены вручную).
+    try:
+        yield Env(
+            pipeline=pipeline,
+            database=database,
+            provider=provider,
+            client=client,
+            publisher=publisher,
+            account_id=account_id,
+            chat_id=chat_id,
+            tg_chat_id=tg_chat_id,
+            rule_id=rule_id,
+            scenario_id=scenario_id,
+            clients=clients,
+        )
+    finally:
+        await clients.shutdown()
+        async with database.session() as db:
+            await db.execute(delete(Action).where(Action.account_id == account_id))
+            await db.execute(delete(AIRequest).where(AIRequest.account_id == account_id))
+            await db.execute(delete(Rule).where(Rule.id == rule_id))
+            await db.execute(
+                delete(ProcessedMessage).where(ProcessedMessage.account_id == account_id)
+            )
+            await db.execute(delete(Account).where(Account.id == account_id))
+            await db.execute(delete(Scenario).where(Scenario.id == scenario_id))
+            await db.execute(delete(Notification).where(Notification.user_id.is_(None)))
+        await database.disconnect()
 
-    await clients.shutdown()
-    async with database.session() as db:
-        await db.execute(delete(Action).where(Action.account_id == account_id))
-        await db.execute(delete(AIRequest).where(AIRequest.account_id == account_id))
-        await db.execute(delete(Rule).where(Rule.id == rule_id))
-        await db.execute(delete(ProcessedMessage).where(ProcessedMessage.account_id == account_id))
-        await db.execute(delete(Account).where(Account.id == account_id))
-        await db.execute(delete(Scenario).where(Scenario.id == scenario_id))
-        await db.execute(delete(Notification).where(Notification.user_id.is_(None)))
-    await database.disconnect()
 
-
-async def incoming(env: Env, text: str = "Всем привет, нужен дизайнер", **kwargs: object):
+async def incoming(
+    env: Env, text: str = "Всем привет, нужен дизайнер", **kwargs: object
+) -> PipelineOutcome:
     return await env.pipeline.handle_event(
         env.account_id,
         FakeEvent(chat_id=env.tg_chat_id, text=text, **kwargs),  # type: ignore[arg-type]

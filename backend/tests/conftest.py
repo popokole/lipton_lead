@@ -25,7 +25,7 @@ _REQUIRED: dict[str, Any] = {
 
 def make_settings(**overrides: Any) -> Settings:
     """Собирает Settings без чтения окружения и .env."""
-    return Settings(**{**_REQUIRED, **overrides})  # type: ignore[arg-type]
+    return Settings(**{**_REQUIRED, **overrides})
 
 
 @pytest.fixture

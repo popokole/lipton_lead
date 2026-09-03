@@ -109,22 +109,28 @@ async def env(integration_settings: Settings) -> AsyncIterator[PipelineEnv]:
         publisher,  # type: ignore[arg-type]
     )
 
-    yield PipelineEnv(
-        pipeline=pipeline,
-        database=database,
-        account_id=account_id,
-        chat_id=chat_id,
-        tg_chat_id=tg_chat_id,
-        rule_id=rule_id,
-        publisher=publisher,
-        self_guard=self_guard,
-    )
-
-    async with database.session() as db:
-        await db.execute(delete(Rule).where(Rule.id == rule_id))
-        await db.execute(delete(ProcessedMessage).where(ProcessedMessage.account_id == account_id))
-        await db.execute(delete(Account).where(Account.id == account_id))
-    await database.disconnect()
+    # try/finally: без него исключение из теста прокидывается в генератор
+    # прямо на yield и пропускает очистку — упавший тест насовсем оставляет
+    # Account/Rule в общей базе.
+    try:
+        yield PipelineEnv(
+            pipeline=pipeline,
+            database=database,
+            account_id=account_id,
+            chat_id=chat_id,
+            tg_chat_id=tg_chat_id,
+            rule_id=rule_id,
+            publisher=publisher,
+            self_guard=self_guard,
+        )
+    finally:
+        async with database.session() as db:
+            await db.execute(delete(Rule).where(Rule.id == rule_id))
+            await db.execute(
+                delete(ProcessedMessage).where(ProcessedMessage.account_id == account_id)
+            )
+            await db.execute(delete(Account).where(Account.id == account_id))
+        await database.disconnect()
 
 
 async def count_messages(env: PipelineEnv) -> int:
@@ -258,17 +264,33 @@ class TestSelfProtection:
 
 class TestChatScope:
     async def test_message_from_unmonitored_chat_is_not_stored(self, env: PipelineEnv) -> None:
+        """Оператор мог точечно выключить слежку за уже известным чатом —
+        это единственный способ получить unmonitored=False (новые чаты
+        заводятся сразу отслеживаемыми, см. test_unknown_chat_is_registered)."""
+        unmonitored_chat_id = env.tg_chat_id - 777
+        async with env.database.session() as db:
+            db.add(
+                Chat(
+                    account_id=env.account_id,
+                    tg_chat_id=unmonitored_chat_id,
+                    type=ChatType.SUPERGROUP,
+                    title="Выключенный чат",
+                    monitored=False,
+                )
+            )
+
         outcome = await env.pipeline.handle_event(
             env.account_id,
-            FakeEvent(chat_id=env.tg_chat_id - 777, text="нужен дизайнер"),
+            FakeEvent(chat_id=unmonitored_chat_id, text="нужен дизайнер"),
         )
 
         assert outcome.status is ProcessedStatus.SKIPPED
-        assert outcome.reason == "chat is not monitored"
-        assert await count_messages(env) == 0
+        assert outcome.reason == "no rule matched"
+        assert await count_messages(env) == 1
 
     async def test_unknown_chat_is_registered_for_the_operator(self, env: PipelineEnv) -> None:
-        """Новый чат появляется в панели, но следить за ним решает человек."""
+        """Новый чат сразу заводится отслеживаемым — оператор точечно
+        выключает слежку, а не включает её по одному (см. monitor_pipeline)."""
         foreign_chat_id = env.tg_chat_id - 888
         await env.pipeline.handle_event(
             env.account_id, FakeEvent(chat_id=foreign_chat_id, text="привет")
@@ -281,7 +303,7 @@ class TestChatScope:
                 )
             )
         assert chat is not None
-        assert chat.monitored is False
+        assert chat.monitored is True
 
     async def test_private_chat_is_monitored_from_the_first_message(self, env: PipelineEnv) -> None:
         private_chat_id = abs(env.tg_chat_id) % 1_000_000

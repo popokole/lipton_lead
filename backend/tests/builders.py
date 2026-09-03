@@ -40,7 +40,7 @@ def message(
         tg_message_id=tg_message_id,
         chat_type=chat_type,
         text=text,
-        date=date or datetime(2026, 8, 18, 12, 0, tzinfo=UTC),
+        date=date or datetime.now(UTC),
         is_incoming=not is_outgoing,
         is_outgoing=is_outgoing,
         sender_tg_id=sender_tg_id,
@@ -125,12 +125,12 @@ class FakeEvent:
             (),
             {"username": username, "first_name": first_name, "last_name": last_name},
         )()
-        self.message = _FakeMessage(
+        self.message = FakeRawMessage(
             message_id=message_id,
             chat_id=chat_id,
             text=text,
             out=out,
-            date=date or datetime(2026, 8, 18, 12, 0, tzinfo=UTC),
+            date=date or datetime.now(UTC),
             reply_to_msg_id=reply_to_msg_id,
             fwd_from=fwd_from,
             media=media,
@@ -138,25 +138,32 @@ class FakeEvent:
         )
 
 
-class _FakeMessage:
+class FakeRawMessage:
+    """«Сырое» сообщение Telethon — как из iter_messages, без обёртки события.
+
+    У настоящего Message .message — это ТЕКСТ (не вложенный объект, как у
+    NewMessage.Event.message) — см. _HistoryEvent в app/pipeline/reconcile.py,
+    где это учтено при довыгрузке истории.
+    """
+
     def __init__(
         self,
         *,
         message_id: int,
         chat_id: int,
-        text: str,
-        out: bool,
-        date: datetime,
-        reply_to_msg_id: int | None,
-        fwd_from: object | None,
-        media: object | None,
-        media_kind: str | None,
+        text: str = "",
+        out: bool = False,
+        date: datetime | None = None,
+        reply_to_msg_id: int | None = None,
+        fwd_from: object | None = None,
+        media: object | None = None,
+        media_kind: str | None = None,
     ) -> None:
         self.id = message_id
         self.chat_id = chat_id
         self.message = text
         self.out = out
-        self.date = date
+        self.date = date or datetime.now(UTC)
         self.reply_to_msg_id = reply_to_msg_id
         self.fwd_from = fwd_from
         self.media = media

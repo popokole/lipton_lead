@@ -67,6 +67,15 @@ class MessageFilterSpec:
         )
 
 
+_REASON_OWN_OUTGOING = "own outgoing message"
+_REASON_OWN_ACCOUNT = "sender is one of our own accounts"
+
+#: Причины SKIPPED от SelfGuard — то есть «в базу не попало и не должно
+#: было», а не пропущенное сообщение. Экспортируется для reconcile.py: там
+#: нужно отличить настоящий пропуск от собственных сообщений в истории чата.
+SELF_GUARD_REASONS = (_REASON_OWN_OUTGOING, _REASON_OWN_ACCOUNT)
+
+
 class SelfGuard:
     """Не пропускает наши собственные сообщения (ТЗ §9).
 
@@ -86,11 +95,11 @@ class SelfGuard:
 
     def check(self, message: NormalizedMessage) -> FilterVerdict:
         if message.is_outgoing:
-            return FilterVerdict.reject("own outgoing message")
+            return FilterVerdict.reject(_REASON_OWN_OUTGOING)
         if message.sender_tg_id is not None and message.sender_tg_id in self._own_ids:
             # Сообщение другого нашего же аккаунта: ответ на него запустил бы
             # бесконечную переписку двух аккаунтов между собой.
-            return FilterVerdict.reject("sender is one of our own accounts")
+            return FilterVerdict.reject(_REASON_OWN_ACCOUNT)
         return FilterVerdict.ok()
 
 
