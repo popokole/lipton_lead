@@ -1,32 +1,94 @@
 'use client';
 
+import {
+  BookOpen,
+  Bot,
+  ChevronDown,
+  FlaskConical,
+  Home,
+  LayoutGrid,
+  ListChecks,
+  MessageSquare,
+  Server,
+  Settings,
+  ShieldAlert,
+  Sparkles,
+  Target,
+  Users,
+} from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
+import type { ComponentType } from 'react';
 
 import { api, logout, tokens } from '@/lib/api';
 import type { CurrentUser } from '@/lib/types';
 
-const NAV = [
-  { href: '/', label: 'Дашборд' },
-  { href: '/handoff', label: 'Требует внимания' },
-  { href: '/reviews', label: 'На подтверждение' },
-  { href: '/accounts', label: 'Аккаунты' },
-  { href: '/chats', label: 'Чаты' },
-  { href: '/tree', label: 'Дерево чатов' },
-  { href: '/scenarios', label: 'Сценарии' },
-  { href: '/abtest', label: 'A/B заходов' },
-  { href: '/knowledge', label: 'База знаний' },
-  { href: '/rules', label: 'Правила' },
-  { href: '/stoplist', label: 'Стоп-лист' },
-  { href: '/messages', label: 'Сообщения' },
-  { href: '/conversations', label: 'Диалоги' },
-  { href: '/inbox', label: 'Общение' },
-  { href: '/leads', label: 'Лиды' },
-  { href: '/logs', label: 'Журнал' },
-  { href: '/workers', label: 'Воркеры' },
-  { href: '/settings', label: 'Настройки' },
+interface NavItem {
+  href: string;
+  label: string;
+  icon: ComponentType<{ size?: number; className?: string }>;
+}
+
+interface NavGroup {
+  section: string;
+  icon: ComponentType<{ size?: number; className?: string }>;
+  items: NavItem[];
+}
+
+const NAV: NavGroup[] = [
+  { section: 'Обзор', icon: LayoutGrid, items: [{ href: '/overview', label: 'Обзор', icon: LayoutGrid }] },
+  {
+    section: 'Общение',
+    icon: MessageSquare,
+    items: [
+      { href: '/inbox', label: 'Общение', icon: MessageSquare },
+      { href: '/chats', label: 'Чаты', icon: MessageSquare },
+      { href: '/conversations', label: 'Диалоги', icon: MessageSquare },
+      { href: '/tree', label: 'Дерево чатов', icon: MessageSquare },
+      { href: '/messages', label: 'Сообщения', icon: MessageSquare },
+    ],
+  },
+  {
+    section: 'Внимания требует',
+    icon: ShieldAlert,
+    items: [
+      { href: '/handoff', label: 'Требует внимания', icon: ShieldAlert },
+      { href: '/reviews', label: 'На подтверждение', icon: ListChecks },
+    ],
+  },
+  {
+    section: 'Настройка ИИ',
+    icon: Sparkles,
+    items: [
+      { href: '/scenarios', label: 'Сценарии', icon: Sparkles },
+      { href: '/rules', label: 'Правила', icon: Bot },
+      { href: '/knowledge', label: 'База знаний', icon: BookOpen },
+      { href: '/abtest', label: 'A/B заходов', icon: FlaskConical },
+      { href: '/stoplist', label: 'Стоп-лист', icon: ShieldAlert },
+    ],
+  },
+  { section: 'Лиды', icon: Target, items: [{ href: '/leads', label: 'Лиды', icon: Target }] },
+  {
+    section: 'Система',
+    icon: Server,
+    items: [
+      { href: '/accounts', label: 'Аккаунты', icon: Users },
+      { href: '/workers', label: 'Воркеры', icon: Server },
+      { href: '/logs', label: 'Журнал', icon: ListChecks },
+      { href: '/settings', label: 'Настройки', icon: Settings },
+    ],
+  },
 ];
+
+function activeGroupSection(pathname: string): string | null {
+  for (const group of NAV) {
+    if (group.items.some((item) => (item.href === '/' ? pathname === '/' : pathname.startsWith(item.href)))) {
+      return group.section;
+    }
+  }
+  return null;
+}
 
 /**
  * Каркас панели с проверкой входа.
@@ -40,6 +102,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [checked, setChecked] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [openSection, setOpenSection] = useState<string | null>(() => activeGroupSection(pathname));
 
   useEffect(() => {
     if (!tokens.access()) {
@@ -53,9 +116,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
       .finally(() => setChecked(true));
   }, [router]);
 
-  // Навигация закрывает мобильное меню.
+  // Навигация закрывает мобильное меню и разворачивает группу текущего раздела.
   useEffect(() => {
     setMenuOpen(false);
+    const current = activeGroupSection(pathname);
+    if (current) setOpenSection(current);
   }, [pathname]);
 
   if (!checked) {
@@ -69,18 +134,73 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <div className="text-xs text-slate-500">панель управления</div>
       </div>
       <nav className="space-y-0.5">
-        {NAV.map((item) => {
-          const active = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
+        <Link
+          href="/"
+          className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition ${
+            pathname === '/' ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:bg-ink-800'
+          }`}
+        >
+          <Home size={16} />
+          Главная
+        </Link>
+        <div className="my-2 border-t border-ink-800" />
+        {NAV.map((group) => {
+          if (group.items.length === 1) {
+            const item = group.items[0];
+            const active = pathname.startsWith(item.href);
+            const Icon = item.icon;
+            return (
+              <Link
+                key={group.section}
+                href={item.href}
+                className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition ${
+                  active ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:bg-ink-800'
+                }`}
+              >
+                <Icon size={16} />
+                {item.label}
+              </Link>
+            );
+          }
+
+          const GroupIcon = group.icon;
+          const expanded = openSection === group.section;
           return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`block rounded-lg px-3 py-2 text-sm transition ${
-                active ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:bg-ink-800'
-              }`}
-            >
-              {item.label}
-            </Link>
+            <div key={group.section}>
+              <button
+                onClick={() => setOpenSection(expanded ? null : group.section)}
+                className="flex w-full items-center justify-between gap-2.5 rounded-lg px-3 py-2 text-sm text-slate-400 transition hover:bg-ink-800"
+              >
+                <span className="flex items-center gap-2.5">
+                  <GroupIcon size={16} />
+                  {group.section}
+                </span>
+                <ChevronDown
+                  size={14}
+                  className={`transition-transform ${expanded ? 'rotate-180' : ''}`}
+                />
+              </button>
+              {expanded && (
+                <div className="ml-3 space-y-0.5 border-l border-ink-800 pl-3">
+                  {group.items.map((item) => {
+                    const active = pathname.startsWith(item.href);
+                    const Icon = item.icon;
+                    return (
+                      <Link
+                        key={item.href}
+                        href={item.href}
+                        className={`flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm transition ${
+                          active ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:bg-ink-800'
+                        }`}
+                      >
+                        <Icon size={15} />
+                        {item.label}
+                      </Link>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           );
         })}
       </nav>

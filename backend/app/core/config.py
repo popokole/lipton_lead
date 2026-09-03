@@ -124,6 +124,11 @@ class Settings(BaseSettings):
     ai_fallback_models: Annotated[list[str], NoDecode] = Field(
         default_factory=list, alias="AI_FALLBACK_MODELS"
     )
+    # Резервный провайдер: отдельный путь до api.anthropic.com, не зависящий
+    # от агрегатора основного провайдера. Включается сам по себе, когда задан
+    # ключ (см. app/ai/registry.py) — так сбой codex.sale не блокирует ответ.
+    anthropic_api_key: SecretStr | None = Field(default=None, alias="ANTHROPIC_API_KEY")
+    anthropic_model: str = Field(default="claude-3-5-haiku-latest", alias="ANTHROPIC_MODEL")
     default_ai_model: str = Field(default="gpt-4o-mini", alias="DEFAULT_AI_MODEL")
     default_ai_temperature: float = Field(default=0.6, ge=0, le=2, alias="DEFAULT_AI_TEMPERATURE")
     default_ai_max_tokens: int = Field(default=600, ge=1, alias="DEFAULT_AI_MAX_TOKENS")

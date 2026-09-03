@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -40,7 +41,11 @@ class Scenario(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     require_knowledge_grounding: Mapped[bool] = mapped_column(
         sa.Boolean, nullable=False, default=False
     )
-    fallback_text: Mapped[str | None] = mapped_column(sa.Text)
+    # Пул готовых фраз на случай сбоя/отказа ИИ: заранее написанный человеком
+    # текст лучше выдуманного или пустого ответа. Пусто — эскалация к человеку.
+    fallback_texts: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=sa.text("'[]'::jsonb")
+    )
 
     human_handoff_enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=True)
 
@@ -48,8 +53,6 @@ class Scenario(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # ИИ-ответ — в личку автору. Для лички правило работает как обычно.
     reply_in_dm: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
     group_ack_text: Mapped[str | None] = mapped_column(sa.Text)
-    # id топика в форум-группе бота-уведомлений: создаётся лениво, один раз.
-    notify_topic_id: Mapped[int | None] = mapped_column(sa.BigInteger)
     min_confidence: Mapped[float | None] = mapped_column(sa.Numeric(3, 2))
 
     # Human-in-the-loop: если ИИ не уверен (уверенность в полосе

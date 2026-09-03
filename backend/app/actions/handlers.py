@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from app.actions.cooldown import CooldownGuard
 from app.actions.engine import ActionRequest, ActionResult
 from app.bus.events import EventPublisher
 from app.bus.messages import Event, EventType
@@ -28,6 +29,7 @@ from app.models import (
     Notification,
     NotificationType,
     ProcessedStatus,
+    Rule,
 )
 from app.models import EventType as LogEventType
 from app.notifications.notifier import NotifierBot, format_lead_card
@@ -248,14 +250,15 @@ class ReplyHandler:
                 )
 
                 if self.notifier is not None:
-                    from app.models import Scenario as _Scenario
-
-                    scenario_name = None
-                    if request.scenario_id is not None:
-                        scen = await db.get(_Scenario, request.scenario_id)
-                        scenario_name = scen.name if scen else None
+                    rule_name = None
+                    notify_topic_enabled = False
+                    if request.rule_id is not None:
+                        rule = await db.get(Rule, request.rule_id)
+                        if rule is not None:
+                            rule_name = rule.name
+                            notify_topic_enabled = rule.notify_topic_enabled
                     card = format_lead_card(
-                        scenario_name=scenario_name,
+                        rule_name=rule_name,
                         account_label=str(request.account_id)[:8],
                         chat_title=request.message.chat_title,
                         chat_username=request.message.chat_username,
@@ -272,8 +275,9 @@ class ReplyHandler:
                     )
                     await self.notifier.notify_lead(
                         db,
-                        scenario_id=request.scenario_id,
-                        scenario_name=scenario_name,
+                        rule_id=request.rule_id,
+                        rule_name=rule_name,
+                        notify_topic_enabled=notify_topic_enabled,
                         text=card,
                     )
                     # Две общие ленты: все ответы в личке и все в группах.
@@ -378,6 +382,13 @@ class SaveLeadHandler:
     publisher: EventPublisher
     cold_below: int = 30
     hot_from: int = 70
+    # Уведомление в топик (опционально): без него SAVE_LEAD только копит лида
+    # в базе, ничего не постит в Telegram.
+    notifier: NotifierBot | None = None
+    cooldown: CooldownGuard | None = None
+    # Не слать карточку повторно за один и тот же контакт чаще, чем раз в это
+    # время: иначе один активный человек засоряет топик дублями.
+    notify_cooldown_seconds: int = 21600
 
     async def execute(self, request: ActionRequest, action_id: uuid.UUID) -> ActionResult:
         if request.message is None or request.message.sender_tg_id is None:
@@ -400,6 +411,41 @@ class SaveLeadHandler:
             )
             lead_status = lead.status.value
             lead_score = lead.score
+
+            if self.notifier is not None and request.rule_id is not None:
+                allowed = True
+                if self.cooldown is not None:
+                    key = (
+                        f"leadnotify:{request.account_id}:{request.rule_id}:"
+                        f"{request.message.sender_tg_id}"
+                    )
+                    allowed = await self.cooldown.claim_once(key, self.notify_cooldown_seconds)
+                if allowed:
+                    rule = await db.get(Rule, request.rule_id)
+                    rule_name = rule.name if rule else None
+                    notify_topic_enabled = bool(rule.notify_topic_enabled) if rule else False
+                    card = format_lead_card(
+                        rule_name=rule_name,
+                        account_label=str(request.account_id)[:8],
+                        chat_title=request.message.chat_title,
+                        chat_username=request.message.chat_username,
+                        tg_chat_id=request.message.tg_chat_id,
+                        tg_message_id=request.message.tg_message_id,
+                        is_private=request.message.is_private,
+                        sender_name=request.message.sender_display_name,
+                        sender_username=request.message.sender_username,
+                        sender_tg_id=request.message.sender_tg_id,
+                        incoming_text=request.message.text or "",
+                        score=lead_score,
+                        status=lead_status,
+                    )
+                    await self.notifier.notify_lead(
+                        db,
+                        rule_id=request.rule_id,
+                        rule_name=rule_name,
+                        notify_topic_enabled=notify_topic_enabled,
+                        text=card,
+                    )
 
         await self.publisher.publish(
             Event(

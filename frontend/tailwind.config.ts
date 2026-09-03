@@ -6,19 +6,22 @@ const config: Config = {
     extend: {
       colors: {
         ink: {
-          950: '#0b0e14',
-          900: '#111621',
-          800: '#171d2b',
-          700: '#212a3d',
-          600: '#2d3852',
+          950: '#080b12',
+          900: '#111827',
+          800: '#1a2332',
+          700: '#1f2937',
+          600: '#2d3748',
         },
         accent: {
-          DEFAULT: '#4f8cff',
-          soft: '#1d3a6b',
+          DEFAULT: '#3b82f6',
+          soft: '#152238',
         },
+        success: '#22c55e',
+        warning: '#eab308',
+        danger: '#ef4444',
       },
       fontFamily: {
-        sans: ['ui-sans-serif', 'system-ui', 'Segoe UI', 'Roboto', 'sans-serif'],
+        sans: ['var(--font-inter)', 'ui-sans-serif', 'system-ui', 'Segoe UI', 'Roboto', 'sans-serif'],
         mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
     },

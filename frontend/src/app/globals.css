@@ -4,7 +4,7 @@
 
 html,
 body {
-  background-color: #0b0e14;
+  background-color: #080b12;
   color: #e2e8f0;
 }
 
@@ -14,6 +14,20 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #2d3852;
+  background: #2d3748;
   border-radius: 8px;
+}
+
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.animate-skeleton-pulse {
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
 }

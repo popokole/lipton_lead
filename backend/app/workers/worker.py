@@ -203,6 +203,8 @@ class Worker:
         else:
             logger.warning("ai_provider_not_configured", provider=settings.ai_provider)
 
+        cooldown = CooldownGuard(redis)
+
         actions = ActionEngine(database)
         actions.register(
             ActionType.REPLY,
@@ -215,7 +217,16 @@ class Worker:
             ReviewHandler(database, publisher, notifier=self._notifier),
         )
         actions.register(ActionType.NOTIFY_ADMIN, NotifyAdminHandler(database, publisher))
-        actions.register(ActionType.SAVE_LEAD, SaveLeadHandler(database, publisher))
+        actions.register(
+            ActionType.SAVE_LEAD,
+            SaveLeadHandler(
+                database,
+                publisher,
+                notifier=self._notifier,
+                cooldown=cooldown,
+                notify_cooldown_seconds=settings.anti_duplicate_ttl_seconds,
+            ),
+        )
         actions.register(ActionType.ESCALATE_TO_HUMAN, EscalateToHumanHandler(database, publisher))
         actions.register(ActionType.TAG_USER, TagUserHandler(database))
         actions.register(ActionType.IGNORE, IgnoreHandler(database))
@@ -227,7 +238,7 @@ class Worker:
             generator=generator,
             context=ContextBuilder(settings, database),
             validator=ReplyValidator(),
-            cooldown=CooldownGuard(redis),
+            cooldown=cooldown,
             actions=actions,
         )
 

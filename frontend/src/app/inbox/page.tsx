@@ -188,6 +188,19 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
     }
   };
 
+  const avoidRepeat = thread.reply_settings?.avoid_repeat_topics ?? true;
+  const toggleAvoidRepeat = async () => {
+    try {
+      await api.post(`/conversations/${thread.chat_id}/reply-settings`, {
+        avoid_repeat_topics: !avoidRepeat,
+        repeat_context_depth: thread.reply_settings?.repeat_context_depth ?? 5,
+      });
+      onSent();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    }
+  };
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [messages.data]);
@@ -240,6 +253,17 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
             }`}
           >
             {thread.test_mode ? '🧪 тест-чат' : '🧪 тест'}
+          </button>
+          <button
+            onClick={() => void toggleAvoidRepeat()}
+            title="Не повторять смысл недавних ответов ИИ в этом чате"
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+              avoidRepeat
+                ? 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
+                : 'border border-ink-600 text-slate-400 hover:bg-ink-800'
+            }`}
+          >
+            {avoidRepeat ? '🔁 не повторяться' : '🔁 повторы ок'}
           </button>
           {thread.kind === 'group' && (
             <button

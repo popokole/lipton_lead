@@ -27,7 +27,7 @@ export default function ScenariosPage() {
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState(SAMPLE_PROMPT);
   const [maxLength, setMaxLength] = useState('500');
-  const [fallback, setFallback] = useState('');
+  const [fallbacks, setFallbacks] = useState<string[]>([]);
   const [grounding, setGrounding] = useState(false);
   const [handoff, setHandoff] = useState(false);
   const [replyInDm, setReplyInDm] = useState(false);
@@ -47,7 +47,7 @@ export default function ScenariosPage() {
     setName('');
     setPrompt(SAMPLE_PROMPT);
     setMaxLength('500');
-    setFallback('');
+    setFallbacks([]);
     setGrounding(false);
     setHandoff(false);
     setReplyInDm(false);
@@ -64,7 +64,7 @@ export default function ScenariosPage() {
     setName(s.name);
     setPrompt(s.system_prompt);
     setMaxLength(s.max_reply_length ? String(s.max_reply_length) : '');
-    setFallback(s.fallback_text ?? '');
+    setFallbacks(s.fallback_texts ?? []);
     setGrounding(s.require_knowledge_grounding);
     setHandoff(s.human_handoff_enabled ?? false);
     setReplyInDm(s.reply_in_dm ?? false);
@@ -85,7 +85,7 @@ export default function ScenariosPage() {
         name: name.trim(),
         system_prompt: prompt.trim(),
         max_reply_length: maxLength ? Number(maxLength) : null,
-        fallback_text: fallback.trim() || null,
+        fallback_texts: fallbacks.map((text) => text.trim()).filter(Boolean),
         require_knowledge_grounding: grounding,
         human_handoff_enabled: handoff,
         reply_in_dm: replyInDm,
@@ -146,16 +146,35 @@ export default function ScenariosPage() {
               />
             </Field>
           </div>
-          <Field
-            label="Запасной текст"
-            hint="Отправится, если модель откажется отвечать. Пусто — диалог уйдёт человеку"
-          >
-            <input
-              className={inputClass}
-              value={fallback}
-              onChange={(e) => setFallback(e.target.value)}
-            />
-          </Field>
+          <div className="lg:col-span-2">
+            <Field
+              label="Запасные тексты"
+              hint="Один из них уйдёт случайно, если модель откажется отвечать. Пусто — диалог уйдёт человеку"
+            >
+              <div className="space-y-2">
+                {fallbacks.map((text, index) => (
+                  <div key={index} className="flex gap-2">
+                    <input
+                      className={inputClass}
+                      value={text}
+                      onChange={(e) =>
+                        setFallbacks((prev) => prev.map((t, i) => (i === index ? e.target.value : t)))
+                      }
+                    />
+                    <Button
+                      variant="ghost"
+                      onClick={() => setFallbacks((prev) => prev.filter((_, i) => i !== index))}
+                    >
+                      Убрать
+                    </Button>
+                  </div>
+                ))}
+                <Button variant="ghost" onClick={() => setFallbacks((prev) => [...prev, ''])}>
+                  + добавить вариант
+                </Button>
+              </div>
+            </Field>
+          </div>
           <Field label="База знаний" hint="ИИ будет отвечать по её материалам (цены, FAQ). Пусто — без базы">
             <select className={inputClass} value={kbId} onChange={(e) => setKbId(e.target.value)}>
               <option value="">— не привязывать —</option>

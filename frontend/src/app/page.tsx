@@ -1,95 +1,121 @@
 'use client';
 
-import { Shell } from '@/components/shell';
-import { Badge, BarChart, Card, Empty, ErrorText, PageHeader, Stat, Table } from '@/components/ui';
-import { useApi, useRealtime } from '@/lib/hooks';
-import type { DashboardCounters, DashboardSeries, RuleStat } from '@/lib/types';
+import {
+  Bot,
+  MessageSquare,
+  Server,
+  ShieldAlert,
+  Sparkles,
+  Target,
+} from 'lucide-react';
+import Link from 'next/link';
+import type { ComponentType } from 'react';
 
-export default function DashboardPage() {
-  const counters = useApi<DashboardCounters>('/analytics/dashboard', 10_000);
+import { Shell } from '@/components/shell';
+import { BarChart, Card, PageHeader } from '@/components/ui';
+import { useApi } from '@/lib/hooks';
+import type { DashboardCounters, DashboardSeries } from '@/lib/types';
+
+interface TileDef {
+  href: string;
+  label: string;
+  description: string;
+  icon: ComponentType<{ size?: number; className?: string }>;
+  stat: (c: DashboardCounters | null) => string;
+  points: (s: DashboardSeries | null) => { day: string; value: number }[];
+  color: string;
+}
+
+const TILES: TileDef[] = [
+  {
+    href: '/overview',
+    label: 'Обзор',
+    description: 'Сводка, графики, живая лента',
+    icon: Server,
+    stat: (c) => `${c?.messages_today ?? 0} сообщ. за сутки`,
+    points: (s) => s?.messages ?? [],
+    color: '#3b82f6',
+  },
+  {
+    href: '/inbox',
+    label: 'Общение',
+    description: 'Личка и группы, ручные ответы',
+    icon: MessageSquare,
+    stat: (c) => `${c?.replies_today ?? 0} ответов за сутки`,
+    points: (s) => s?.replies ?? [],
+    color: '#22c55e',
+  },
+  {
+    href: '/handoff',
+    label: 'Внимания требует',
+    description: 'Эскалации и подтверждения',
+    icon: ShieldAlert,
+    stat: (c) => `${c?.errors_today ?? 0} ошибок за сутки`,
+    points: (s) => s?.errors ?? [],
+    color: '#ef4444',
+  },
+  {
+    href: '/scenarios',
+    label: 'Настройка ИИ',
+    description: 'Сценарии, правила, база знаний',
+    icon: Sparkles,
+    stat: (c) => `${c?.ai_analyzed_today ?? 0} обращений к AI`,
+    points: (s) => s?.matches ?? [],
+    color: '#eab308',
+  },
+  {
+    href: '/leads',
+    label: 'Лиды',
+    description: 'Собранные контакты и статусы',
+    icon: Target,
+    stat: (c) => `${c?.leads_total ?? 0} всего`,
+    points: (s) => s?.leads ?? [],
+    color: '#3b82f6',
+  },
+  {
+    href: '/accounts',
+    label: 'Система',
+    description: 'Аккаунты, воркеры, журнал',
+    icon: Bot,
+    stat: (c) => `${c?.workers_healthy ?? 0} живых воркеров`,
+    points: (s) => s?.messages ?? [],
+    color: '#94a3b8',
+  },
+];
+
+export default function HomePage() {
+  const counters = useApi<DashboardCounters>('/analytics/dashboard', 15_000);
   const series = useApi<DashboardSeries>('/analytics/series?days=14', 60_000);
-  const ruleStats = useApi<RuleStat[]>('/analytics/rules', 30_000);
-  const realtime = useRealtime(25);
 
   return (
     <Shell>
-      <PageHeader
-        title="Дашборд"
-        subtitle="Сводка за последние сутки"
-        actions={
-          <span className={`text-xs ${realtime.connected ? 'text-emerald-400' : 'text-slate-500'}`}>
-            {realtime.connected ? '● realtime подключён' : '○ realtime не подключён'}
-          </span>
-        }
-      />
-
-      <ErrorText>{counters.error}</ErrorText>
-
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <Stat label="Аккаунты онлайн" value={`${counters.data?.accounts_online ?? 0} / ${counters.data?.accounts_total ?? 0}`} />
-        <Stat label="Чатов под наблюдением" value={counters.data?.chats_monitored ?? 0} />
-        <Stat label="Сообщений за сутки" value={counters.data?.messages_today ?? 0} />
-        <Stat label="Обращений к AI" value={counters.data?.ai_analyzed_today ?? 0} />
-        <Stat label="Отправлено ответов" value={counters.data?.replies_today ?? 0} />
-        <Stat label="Лидов всего" value={counters.data?.leads_total ?? 0} />
-        <Stat label="Предупреждений" value={counters.data?.errors_today ?? 0} />
-        <Stat label="Живых воркеров" value={counters.data?.workers_healthy ?? 0} />
+      <PageHeader title="Главная" subtitle="Выберите раздел" />
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {TILES.map((tile) => {
+          const Icon = tile.icon;
+          return (
+            <Link key={tile.href} href={tile.href} className="block">
+              <Card className="h-full transition hover:border-accent/50">
+                <div className="flex items-center gap-3">
+                  <div className="rounded-lg bg-ink-800 p-2 text-accent">
+                    <Icon size={20} />
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-slate-100">{tile.label}</div>
+                    <div className="text-xs text-slate-500">{tile.description}</div>
+                  </div>
+                </div>
+                <div className="mt-4 text-lg font-semibold text-slate-200">
+                  {tile.stat(counters.data)}
+                </div>
+                <div className="mt-2">
+                  <BarChart points={tile.points(series.data)} color={tile.color} />
+                </div>
+              </Card>
+            </Link>
+          );
+        })}
       </div>
-
-      <div className="mt-6 grid gap-4 lg:grid-cols-2">
-        <Card title="Сообщения по дням">
-          <BarChart points={series.data?.messages ?? []} />
-        </Card>
-        <Card title="Совпадения правил по дням">
-          <BarChart points={series.data?.matches ?? []} color="#38bdf8" />
-        </Card>
-        <Card title="Ответы по дням">
-          <BarChart points={series.data?.replies ?? []} color="#34d399" />
-        </Card>
-        <Card title="Лиды по дням">
-          <BarChart points={series.data?.leads ?? []} color="#fbbf24" />
-        </Card>
-      </div>
-
-      <Card title="Ответы по правилам" className="mt-6">
-        <ErrorText>{ruleStats.error}</ErrorText>
-        {(ruleStats.data?.length ?? 0) === 0 ? (
-          <Empty>Правил пока нет</Empty>
-        ) : (
-          <Table head={['Правило', 'Статус', 'Совпадений', 'Ответов']}>
-            {ruleStats.data?.map((rule) => (
-              <tr key={rule.rule_id} className="border-b border-ink-800/70 last:border-0">
-                <td className="py-2 pr-4 text-slate-200">{rule.rule_name}</td>
-                <td className="py-2 pr-4">
-                  <Badge tone={rule.enabled ? 'ok' : 'mute'}>
-                    {rule.enabled ? 'включено' : 'выключено'}
-                  </Badge>
-                </td>
-                <td className="py-2 pr-4 text-slate-400">{rule.matches}</td>
-                <td className="py-2 text-slate-300">{rule.replies}</td>
-              </tr>
-            ))}
-          </Table>
-        )}
-      </Card>
-
-      <Card title="Живая лента" className="mt-6">
-        {realtime.events.length === 0 ? (
-          <Empty>
-            Событий пока не было. Они появятся, как только аккаунт начнёт получать сообщения.
-          </Empty>
-        ) : (
-          <ul className="space-y-1 font-mono text-xs text-slate-400">
-            {realtime.events.map((event, index) => (
-              <li key={`${event.ts}-${index}`} className="truncate">
-                <span className="text-slate-600">{event.ts.slice(11, 19)}</span>{' '}
-                <span className="text-accent">{event.type}</span>{' '}
-                {JSON.stringify(event.payload).slice(0, 160)}
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
     </Shell>
   );
 }

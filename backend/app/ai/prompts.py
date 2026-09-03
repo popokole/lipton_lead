@@ -143,6 +143,18 @@ def build_generate_messages(request: GenerateRequest) -> list[ChatMessage]:
     if request.memory:
         facts = "\n".join(f"- {key}: {value}" for key, value in request.memory.items())
         messages.append(ChatMessage(role="system", content=f"Известно о собеседнике:\n{facts}"))
+    if request.recent_replies:
+        recent = "\n".join(f"- {text}" for text in request.recent_replies)
+        messages.append(
+            ChatMessage(
+                role="system",
+                content=(
+                    "В этом чате недавно уже отправлялись такие сообщения. Не "
+                    "повторяй их дословно и не пересказывай тот же смысл теми же "
+                    f"словами, если тема похожая, сформулируй по-новому:\n{recent}"
+                ),
+            )
+        )
     if request.knowledge:
         chunks = "\n\n".join(f"[{index}] {text}" for index, text in enumerate(request.knowledge, 1))
         messages.append(ChatMessage(role="system", content=f"База знаний:\n{chunks}"))

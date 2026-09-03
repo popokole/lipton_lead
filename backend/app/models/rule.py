@@ -68,6 +68,11 @@ class Rule(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         JSONB, nullable=False, default=dict, server_default=sa.text("'{}'::jsonb")
     )
 
+    # Свой топик в форум-группе уведомлений вместо общего "Общение ИИ":
+    # id создаётся лениво, при первом реальном срабатывании правила.
+    notify_topic_enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
+    notify_topic_id: Mapped[int | None] = mapped_column(sa.BigInteger)
+
     __table_args__ = (
         sa.CheckConstraint(
             "ai_threshold IS NULL OR (ai_threshold >= 0 AND ai_threshold <= 1)",

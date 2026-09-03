@@ -1,7 +1,9 @@
 """Бот-уведомления: отчёты о лидах в форум-группу (ТЗ §36).
 
-Отдельный бот (токен @BotFather) шлёт карточку лида в топик, свой на каждый
-сценарий. Топик создаётся лениво один раз и запоминается в `scenario.notify_topic_id`.
+Отдельный бот (токен @BotFather) шлёт карточку лида в топик. По умолчанию все
+ответы и карточки идут в один общий топик «Общение ИИ» (`notify_settings.ai_chat_topic_id`);
+правило со включённым `notify_topic_enabled` получает СВОЙ топик, который
+создаётся лениво один раз и запоминается в `rule.notify_topic_id`.
 
 Это Bot API (api.telegram.org), а не пользовательский клиент Telethon —
 поэтому обычный httpx, без сессий и аренды. Работает в воркере рядом с
@@ -21,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import EncryptedBlob, SecretBox
 from app.core.logging import get_logger
-from app.models import Chat, Scenario
+from app.models import Chat, Rule
 from app.models.notify import SINGLETON_ID, NotifySettings
 
 logger = get_logger(__name__)
@@ -52,11 +54,12 @@ class NotifierBot:
         return str(me.get("username") or "")
 
     async def sync_topics(self, db: AsyncSession, *, rename: bool) -> dict[str, Any]:
-        """Готовит группу: топик на каждый сценарий.
+        """Готовит группу: общий топик «Общение ИИ» + свой топик у отмеченных правил.
 
-        Проверяет, что группа — форум (иначе топики создать нельзя), затем на
-        каждый сценарий создаёт топик, если его ещё нет. При rename=True
-        приводит имя топика к текущему имени сценария (editForumTopic).
+        Проверяет, что группа — форум (иначе топики создать нельзя). Свой топик
+        создаётся только для правил с `notify_topic_enabled=True`; остальные
+        правила используют общий топик. При rename=True приводит имя топика
+        правила к его текущему имени (editForumTopic).
         """
         loaded = await self._load_settings(db, require_enabled=False)
         if loaded is None:
@@ -70,14 +73,16 @@ class NotifierBot:
                 "группы и сделайте бота админом с правом управлять темами."
             )
 
-        scenarios = list((await db.scalars(select(Scenario))).all())
+        rules = list(
+            (await db.scalars(select(Rule).where(Rule.notify_topic_enabled.is_(True)))).all()
+        )
         created = existing = renamed = 0
-        for scenario in scenarios:
-            if scenario.notify_topic_id is None:
+        for rule in rules:
+            if rule.notify_topic_id is None:
                 topic = await self._call(
-                    token, "createForumTopic", chat_id=group_id, name=scenario.name[:128]
+                    token, "createForumTopic", chat_id=group_id, name=rule.name[:128]
                 )
-                scenario.notify_topic_id = int(topic["message_thread_id"])
+                rule.notify_topic_id = int(topic["message_thread_id"])
                 created += 1
             else:
                 existing += 1
@@ -87,33 +92,22 @@ class NotifierBot:
                             token,
                             "editForumTopic",
                             chat_id=group_id,
-                            message_thread_id=scenario.notify_topic_id,
-                            name=scenario.name[:128],
+                            message_thread_id=rule.notify_topic_id,
+                            name=rule.name[:128],
                         )
                         renamed += 1
                     except NotifyError:
                         pass  # топик мог быть удалён вручную — не критично
 
-        # Два постоянных топика-ленты: все ответы в личке и все в группах.
+        # Общий поток: все ответы и карточки на подтверждение, для которых
+        # правило не завело свой топик.
         row = await db.get(NotifySettings, SINGLETON_ID)
         if row is not None:
-            if row.dm_topic_id is None:
+            if row.ai_chat_topic_id is None:
                 topic = await self._call(
-                    token, "createForumTopic", chat_id=group_id, name="Общение ИИ · личка"
+                    token, "createForumTopic", chat_id=group_id, name="Общение ИИ"
                 )
-                row.dm_topic_id = int(topic["message_thread_id"])
-                created += 1
-            if row.group_topic_id is None:
-                topic = await self._call(
-                    token, "createForumTopic", chat_id=group_id, name="Общение ИИ · группы"
-                )
-                row.group_topic_id = int(topic["message_thread_id"])
-                created += 1
-            if row.review_topic_id is None:
-                topic = await self._call(
-                    token, "createForumTopic", chat_id=group_id, name="На подтверждение"
-                )
-                row.review_topic_id = int(topic["message_thread_id"])
+                row.ai_chat_topic_id = int(topic["message_thread_id"])
                 created += 1
             if row.digest_topic_id is None:
                 topic = await self._call(
@@ -125,37 +119,36 @@ class NotifierBot:
         await db.flush()
         return {
             "is_forum": True,
-            "scenarios": len(scenarios),
+            "rules_with_own_topic": len(rules),
             "created": created,
             "existing": existing,
             "renamed": renamed,
         }
 
-    async def notify_stream(self, db: AsyncSession, *, is_private: bool, text: str) -> None:
-        """Шлёт ответ в постоянный топик-ленту: личка или группы.
+    async def _ensure_stream_topic(self, db: AsyncSession, token: str, group_id: int) -> int | None:
+        """id общего топика «Общение ИИ», создавая его при первом обращении."""
+        row = await db.get(NotifySettings, SINGLETON_ID)
+        if row is None:
+            return None
+        if row.ai_chat_topic_id is None:
+            topic = await self._call(token, "createForumTopic", chat_id=group_id, name="Общение ИИ")
+            row.ai_chat_topic_id = int(topic["message_thread_id"])
+            await db.flush()
+        return row.ai_chat_topic_id
 
-        Отдельно от notify_lead (топик сценария): здесь копятся ВСЕ наши
-        ответы двумя лентами. Топик создаётся лениво при первом обращении.
-        Никогда не поднимает исключение — уведомление вторично.
+    async def notify_stream(self, db: AsyncSession, *, is_private: bool, text: str) -> None:
+        """Шлёт ответ в общий топик «Общение ИИ».
+
+        Отдельно от notify_lead (свой топик правила, если включён): здесь
+        копятся все наши ответы одним потоком. Никогда не поднимает
+        исключение — уведомление вторично.
         """
         try:
             settings = await self._load_settings(db)
             if settings is None:
                 return
             token, group_id = settings
-            row = await db.get(NotifySettings, SINGLETON_ID)
-            if row is None:
-                return
-            field = "dm_topic_id" if is_private else "group_topic_id"
-            thread_id = getattr(row, field)
-            if thread_id is None:
-                name = "Общение ИИ · личка" if is_private else "Общение ИИ · группы"
-                topic = await self._call(
-                    token, "createForumTopic", chat_id=group_id, name=name
-                )
-                thread_id = int(topic["message_thread_id"])
-                setattr(row, field, thread_id)
-                await db.flush()
+            thread_id = await self._ensure_stream_topic(db, token, group_id)
             await self._call(
                 token,
                 "sendMessage",
@@ -173,21 +166,25 @@ class NotifierBot:
         self,
         db: AsyncSession,
         *,
-        scenario_id: uuid.UUID | None,
-        scenario_name: str | None,
+        rule_id: uuid.UUID | None,
+        rule_name: str | None,
+        notify_topic_enabled: bool = False,
         text: str,
     ) -> None:
-        """Шлёт готовый текст в топик сценария. Молча выходит, если выключено.
+        """Шлёт готовый текст в топик правила (если включён) или в общий поток.
 
         Никогда не поднимает исключение наверх: уведомление вторично по
-        отношению к ответу лиду.
+        отношению к ответу/сохранению лида.
         """
         try:
             settings = await self._load_settings(db)
             if settings is None:
                 return
             token, group_id = settings
-            thread_id = await self._ensure_topic(db, token, group_id, scenario_id, scenario_name)
+            if notify_topic_enabled and rule_id is not None:
+                thread_id = await self._ensure_topic(db, token, group_id, rule_id, rule_name)
+            else:
+                thread_id = await self._ensure_stream_topic(db, token, group_id)
             await self._call(
                 token,
                 "sendMessage",
@@ -213,17 +210,7 @@ class NotifierBot:
             if settings is None:
                 return
             token, group_id = settings
-            row = await db.get(NotifySettings, SINGLETON_ID)
-            if row is None:
-                return
-            thread_id = row.review_topic_id
-            if thread_id is None:
-                topic = await self._call(
-                    token, "createForumTopic", chat_id=group_id, name="На подтверждение"
-                )
-                thread_id = int(topic["message_thread_id"])
-                row.review_topic_id = thread_id
-                await db.flush()
+            thread_id = await self._ensure_stream_topic(db, token, group_id)
             keyboard = {
                 "inline_keyboard": [
                     [
@@ -353,33 +340,27 @@ class NotifierBot:
         db: AsyncSession,
         token: str,
         group_id: int,
-        scenario_id: uuid.UUID | None,
-        scenario_name: str | None,
+        rule_id: uuid.UUID | None,
+        rule_name: str | None,
     ) -> int | None:
-        """Возвращает id топика сценария, создавая его при первом обращении.
-
-        Без сценария (правило без сценария) шлём в общий поток группы: None.
-        """
-        if scenario_id is None:
+        """Возвращает id своего топика правила, создавая его при первом обращении."""
+        if rule_id is None:
             return None
 
-        scenario = await db.get(Scenario, scenario_id)
-        if scenario is not None and scenario.notify_topic_id is not None:
-            return scenario.notify_topic_id
+        rule = await db.get(Rule, rule_id)
+        if rule is not None and rule.notify_topic_id is not None:
+            return rule.notify_topic_id
 
         topic = await self._call(
             token,
             "createForumTopic",
             chat_id=group_id,
-            name=(scenario_name or "Лиды")[:128],
+            name=(rule_name or "Лиды")[:128],
         )
         thread_id = int(topic["message_thread_id"])
-        if scenario_id is not None:
-            await db.execute(
-                update(Scenario)
-                .where(Scenario.id == scenario_id)
-                .values(notify_topic_id=thread_id)
-            )
+        await db.execute(
+            update(Rule).where(Rule.id == rule_id).values(notify_topic_id=thread_id)
+        )
         return thread_id
 
     async def _record_error(self, db: AsyncSession, detail: str) -> None:
@@ -397,14 +378,14 @@ class NotifyError(RuntimeError):
 
 def format_lead_card(
     *,
-    scenario_name: str | None,
+    rule_name: str | None,
     account_label: str,
     chat_title: str | None,
     sender_name: str | None,
     sender_username: str | None,
     sender_tg_id: int | None,
     incoming_text: str,
-    reply_text: str,
+    reply_text: str = "",
     score: int,
     status: str,
     is_private: bool = False,
@@ -412,7 +393,7 @@ def format_lead_card(
     tg_chat_id: int | None = None,
     tg_message_id: int | None = None,
 ) -> str:
-    """Карточка лида для топика: кто, откуда, текст, наш ответ, ссылка."""
+    """Карточка лида для топика: кто, откуда, текст, наш ответ (если был), ссылка."""
     who = sender_name or (f"@{sender_username}" if sender_username else str(sender_tg_id or "?"))
     link = (
         f"@{sender_username}"
@@ -430,13 +411,15 @@ def format_lead_card(
     if msg_link:
         where_line += f' · <a href="{msg_link}">сообщение</a>'
     where_line += f" · аккаунт {_esc(account_label)}"
-    return (
-        f"🎯 <b>Лид</b> · {status} ({score})\n"
-        f"👤 {_esc(who)} · {link}\n"
-        f"{where_line}\n\n"
-        f"<b>Сообщение:</b>\n{_esc(incoming_text[:400])}\n\n"
-        f"<b>Наш ответ:</b>\n{_esc(reply_text[:400])}"
-    )
+    parts = [
+        f"🎯 <b>Лид</b> · {status} ({score})",
+        f"👤 {_esc(who)} · {link}",
+        where_line,
+        f"\n<b>Сообщение:</b>\n{_esc(incoming_text[:400])}",
+    ]
+    if reply_text.strip():
+        parts.append(f"\n<b>Наш ответ:</b>\n{_esc(reply_text[:400])}")
+    return "\n".join(parts)
 
 
 def message_link(

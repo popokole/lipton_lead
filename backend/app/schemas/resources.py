@@ -193,7 +193,7 @@ class ScenarioOut(ORMModel):
     context_messages: int | None
     knowledge_base_id: uuid.UUID | None
     require_knowledge_grounding: bool
-    fallback_text: str | None
+    fallback_texts: list[str]
     human_handoff_enabled: bool
     reply_in_dm: bool
     group_ack_text: str | None
@@ -218,7 +218,7 @@ class ScenarioCreate(BaseModel):
     context_messages: int | None = Field(default=None, ge=1)
     knowledge_base_id: uuid.UUID | None = None
     require_knowledge_grounding: bool = False
-    fallback_text: str | None = None
+    fallback_texts: list[str] = Field(default_factory=list)
     human_handoff_enabled: bool = True
     reply_in_dm: bool = False
     group_ack_text: str | None = None
@@ -252,6 +252,9 @@ class RuleOut(ORMModel):
     cooldown: dict[str, Any]
     action: ActionType
     action_config: dict[str, Any]
+    # Свой топик в форум-группе уведомлений вместо общего «Общение ИИ».
+    notify_topic_enabled: bool = False
+    notify_topic_id: int | None = None
 
 
 class RuleCreate(BaseModel):
@@ -272,6 +275,7 @@ class RuleCreate(BaseModel):
     action_config: dict[str, Any] = Field(default_factory=dict)
     account_ids: list[uuid.UUID] = Field(default_factory=list)
     chat_ids: list[uuid.UUID] = Field(default_factory=list)
+    notify_topic_enabled: bool = False
 
 
 class RuleUpdate(RuleCreate):
@@ -406,6 +410,8 @@ class ThreadOut(BaseModel):
     cooldown_exempt: bool = False
     # Тест-чат: без ограничений (one_shot/лимит/расписание).
     test_mode: bool = False
+    # {"avoid_repeat_topics": true, "repeat_context_depth": 5}.
+    reply_settings: dict[str, Any] = Field(default_factory=dict)
 
 
 # --- воркеры и сводка ------------------------------------------------------

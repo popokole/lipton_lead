@@ -333,6 +333,7 @@ async def list_threads(
             Chat.monitored.label("monitored"),
             Chat.cooldown_exempt.label("cooldown_exempt"),
             Chat.test_mode.label("test_mode"),
+            Chat.reply_settings.label("reply_settings"),
             Chat.last_message_at.label("last_message_at"),
             (Chat.avatar.is_not(None)).label("has_avatar"),
             last_text.label("last_text"),
@@ -378,6 +379,7 @@ async def list_threads(
                 ai_chat=bool(row.ai_chat),
                 cooldown_exempt=bool(row.cooldown_exempt),
                 test_mode=bool(row.test_mode),
+                reply_settings=dict(row.reply_settings or {}),
             )
         )
     return threads
@@ -561,6 +563,25 @@ async def toggle_test_mode(
     chat.test_mode = payload.enabled
     await db.flush()
     return {"test_mode": payload.enabled}
+
+
+class ReplySettingsIn(BaseModel):
+    avoid_repeat_topics: bool = True
+    repeat_context_depth: int = Field(default=5, ge=0, le=5)
+
+
+@conversations_router.post(
+    "/{chat_id}/reply-settings", summary="Настройки неповторения ответов ИИ в чате"
+)
+async def update_reply_settings(
+    chat_id: uuid.UUID, payload: ReplySettingsIn, _user: OperatorUser, db: DbDep
+) -> dict[str, Any]:
+    chat = await db.get(Chat, chat_id)
+    if chat is None:
+        raise NotFoundError("Чат не найден")
+    chat.reply_settings = payload.model_dump()
+    await db.flush()
+    return chat.reply_settings
 
 
 @leads_router.get("", response_model=list[LeadOut], summary="Лиды")

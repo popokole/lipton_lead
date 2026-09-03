@@ -101,7 +101,7 @@ export interface Scenario {
   review_min_confidence?: number | null;
   one_shot?: boolean;
   knowledge_base_id?: string | null;
-  fallback_text: string | null;
+  fallback_texts: string[];
   enabled: boolean;
 }
 
@@ -124,13 +124,15 @@ export interface Rule {
   scope: 'CHAT_MONITOR' | 'DIALOG' | 'ALL';
   scenario_id: string | null;
   filters: Record<string, unknown>;
-  keywords: { terms?: string[]; exclude?: string[]; mode?: string };
+  keywords: { terms?: string[]; exclude?: string[]; mode?: string; fuzzy_threshold?: number };
   regex: string | null;
   ai_enabled: boolean;
   ai_threshold: number | null;
   cooldown: Record<string, number>;
   action: ActionType;
   action_config: Record<string, unknown>;
+  notify_topic_enabled: boolean;
+  notify_topic_id: number | null;
 }
 
 export interface Message {
@@ -218,6 +220,7 @@ export interface Thread {
   ai_chat: boolean;
   cooldown_exempt: boolean;
   test_mode: boolean;
+  reply_settings: { avoid_repeat_topics?: boolean; repeat_context_depth?: number };
 }
 
 export interface Conversation {

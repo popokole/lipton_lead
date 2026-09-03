@@ -176,6 +176,9 @@ class GenerateRequest(BaseModel):
     # правила ответа (GENERATOR_BASE_RULES).
     base_rules: str | None = None
     max_reply_length: int | None = None
+    # Недавние наши ответы В ЭТОМ ЧАТЕ (не человеку): чтобы не повторяться
+    # смыслово, а не только байт-в-байт (это уже ловит ReplyValidator отдельно).
+    recent_replies: tuple[str, ...] = ()
     model: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None

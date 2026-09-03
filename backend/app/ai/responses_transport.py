@@ -190,6 +190,12 @@ class ResponsesTransport:
             ) as response:
                 if response.status_code >= 400:
                     body = (await response.aread()).decode("utf-8", "replace")[:300]
+                    # 5xx — сбой на стороне шлюза/апстрима (перегрузка, обрыв
+                    # сессии к реальному провайдеру за агрегатором): проходит
+                    # сам за секунды, повтор осмыслен. 4xx — ошибка запроса
+                    # (неверный ключ, кривой payload) — повтор её не исправит.
+                    if response.status_code >= 500:
+                        raise TransportUnstableError(f"HTTP {response.status_code}: {body}")
                     raise AIError(f"HTTP {response.status_code}: {body}")
                 return await self._read_stream(response)
         except httpx.HTTPError as exc:

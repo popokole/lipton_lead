@@ -119,7 +119,35 @@ class TestSpecParsing:
 
     def test_unknown_mode_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="unknown keyword match mode"):
-            KeywordSpec.from_dict({"mode": "fuzzy"})
+            KeywordSpec.from_dict({"mode": "bogus"})
+
+
+class TestFuzzyMode:
+    def test_matches_typo_of_long_term(self) -> None:
+        m = matcher(terms=("евраз",), mode=MatchMode.FUZZY, fuzzy_threshold=0.72)
+        assert m.matches("есть карта евраазия у кого")
+
+    def test_does_not_false_positive_short_stem(self) -> None:
+        # "бот" внутри "работа" не должно ловиться на дефолтном пороге.
+        m = matcher(terms=("бот",), mode=MatchMode.FUZZY)
+        assert m.matches("ищу новую работу") is False
+
+    def test_exact_word_always_matches(self) -> None:
+        m = matcher(terms=("автоматизац",), mode=MatchMode.FUZZY, fuzzy_threshold=0.82)
+        assert m.matches("нужна автоматизация процессов")
+
+    def test_fuzzy_threshold_parsed_from_dict(self) -> None:
+        spec = KeywordSpec.from_dict({"terms": ["евраз"], "mode": "fuzzy", "fuzzy_threshold": 0.65})
+        assert spec.fuzzy_threshold == 0.65
+
+    def test_fuzzy_threshold_defaults_when_missing(self) -> None:
+        spec = KeywordSpec.from_dict({"terms": ["евраз"], "mode": "fuzzy"})
+        assert spec.fuzzy_threshold == 0.8
+
+    def test_find_returns_hit_positions_on_original_text(self) -> None:
+        m = matcher(terms=("евраз",), mode=MatchMode.FUZZY, fuzzy_threshold=0.72)
+        hits = m.find("у кого есть Евраазия")
+        assert hits and hits[0].start == 12
 
 
 class TestRulePattern:

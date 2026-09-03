@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -192,9 +193,16 @@ class OpenAIProvider:
             # Агрегатор не понимает response_format, поэтому формат держим
             # промптом: явно перечисляем поля JSON. Без этого модель отвечает
             # прозой, и text/group_text не разделяются.
+            # Технический маркер, не влияющий на смысл: у некоторых агрегаторов
+            # кеш ответов ключуется по точному тексту запроса. Уникальный id на
+            # каждый запрос гарантирует, что два запроса никогда не совпадут
+            # побайтово.
             hinted = [
                 *messages,
-                ChatMessage(role="system", content=_json_instruction(schema)),
+                ChatMessage(
+                    role="system",
+                    content=f"{json_instruction(schema)}\n(request id: {uuid.uuid4().hex[:12]})",
+                ),
             ]
             result = await self._responses.complete(
                 messages=[message.model_dump() for message in hinted],
@@ -239,11 +247,12 @@ class OpenAIProvider:
 _TYPE_HINTS = {str: "строка", bool: "true/false", int: "целое", float: "число"}
 
 
-def _json_instruction(schema: type[BaseModel]) -> str:
+def json_instruction(schema: type[BaseModel]) -> str:
     """Инструкция для агрегаторов без response_format: поля JSON с типами.
 
     Типы важны: без них модель кладёт прозу в булевы поля вроде used_knowledge,
-    и строгая валидация ломается.
+    и строгая валидация ломается. Публичная — переиспользуется резервным
+    провайдером (app/ai/anthropic_provider.py), у которого свой HTTP-путь.
     """
     parts = []
     for name, field in schema.model_fields.items():

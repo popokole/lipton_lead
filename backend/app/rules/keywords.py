@@ -14,9 +14,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from enum import StrEnum
 from functools import lru_cache
 from typing import Any
+
+DEFAULT_FUZZY_THRESHOLD = 0.8
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
 
 
 class MatchMode(StrEnum):
@@ -24,6 +28,7 @@ class MatchMode(StrEnum):
     WHOLE_WORD = "whole_word"
     EXACT = "exact"
     REGEX = "regex"
+    FUZZY = "fuzzy"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +46,8 @@ class KeywordSpec:
     exclude: tuple[str, ...] = ()
     mode: MatchMode = MatchMode.SUBSTRING
     case_sensitive: bool = False
+    # Только для mode=FUZZY: минимальное сходство слова с термом (0..1).
+    fuzzy_threshold: float = DEFAULT_FUZZY_THRESHOLD
 
     @property
     def is_empty(self) -> bool:
@@ -55,11 +62,17 @@ class KeywordSpec:
         except ValueError as exc:
             raise ValueError(f"unknown keyword match mode: {raw_mode}") from exc
 
+        try:
+            fuzzy_threshold = float(data.get("fuzzy_threshold", DEFAULT_FUZZY_THRESHOLD))
+        except (TypeError, ValueError):
+            fuzzy_threshold = DEFAULT_FUZZY_THRESHOLD
+
         return cls(
             terms=tuple(_clean(data.get("terms"))),
             exclude=tuple(_clean(data.get("exclude"))),
             mode=mode,
             case_sensitive=bool(data.get("case_sensitive", False)),
+            fuzzy_threshold=fuzzy_threshold,
         )
 
 
@@ -72,7 +85,10 @@ class KeywordMatcher:
     _exclude: re.Pattern[str] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._include = _compile(self.spec.terms, self.spec.mode, self.spec.case_sensitive)
+        # FUZZY не компилируется в regex: сравнение идёт по словам через
+        # SequenceMatcher, чтобы ловить опечатки в длинных характерных корнях.
+        if self.spec.mode is not MatchMode.FUZZY:
+            self._include = _compile(self.spec.terms, self.spec.mode, self.spec.case_sensitive)
         # Исключения всегда ищутся как отдельные слова или подстроки: писать
         # регулярку в списке исключений незачем, а ошибиться в ней — легко.
         exclude_mode = (
@@ -86,6 +102,8 @@ class KeywordMatcher:
             return []
         if self._exclude is not None and self._exclude.search(text):
             return []
+        if self.spec.mode is MatchMode.FUZZY:
+            return _find_fuzzy(text, self.spec.terms, self.spec.fuzzy_threshold)
         if self._include is None:
             # Слов нет, но и исключения не сработали: условие выполнено пусто.
             return []
@@ -101,9 +119,30 @@ class KeywordMatcher:
             return False
         if self._exclude is not None and self._exclude.search(text):
             return False
+        if self.spec.mode is MatchMode.FUZZY:
+            return bool(_find_fuzzy(text, self.spec.terms, self.spec.fuzzy_threshold))
         if self._include is None:
             return True
         return self._include.search(text) is not None
+
+
+def _find_fuzzy(text: str, terms: tuple[str, ...], threshold: float) -> list[Hit]:
+    """Сравнивает каждое слово текста с каждым термом (регистронезависимо).
+
+    Только словá, не подстроки: иначе короткие термы ловят опечатку в
+    середине случайного слова. Позиции — по исходному (не lowercased) тексту.
+    """
+    if not terms:
+        return []
+    lowered_terms = tuple(term.lower() for term in terms)
+    hits: list[Hit] = []
+    for match in _WORD_RE.finditer(text):
+        word = match.group(0).lower()
+        for term in lowered_terms:
+            if SequenceMatcher(None, term, word).ratio() >= threshold:
+                hits.append(Hit(term=match.group(0), start=match.start(), end=match.end()))
+                break
+    return hits
 
 
 def _clean(values: Any) -> list[str]:

@@ -38,12 +38,10 @@ class NotifySettings(TimestampMixin, Base):
     # id форум-группы, куда бот шлёт (с включёнными топиками).
     group_id: Mapped[int | None] = mapped_column(TelegramId)
 
-    # Два постоянных топика-ленты: все наши ответы в личке и все в группах.
-    # Создаются лениво (как топики сценариев) и запоминаются здесь.
-    dm_topic_id: Mapped[int | None] = mapped_column(TelegramId)
-    group_topic_id: Mapped[int | None] = mapped_column(TelegramId)
-    # Топик «на подтверждение»: карточки сомнительных ответов с кнопками.
-    review_topic_id: Mapped[int | None] = mapped_column(TelegramId)
+    # Общий поток «Общение ИИ»: все ответы (личка+группы) и карточки на
+    # подтверждение, для которых правило/сценарий не завёл свой топик.
+    # Создаётся лениво. Свой топик — только у правил с notify_topic_enabled.
+    ai_chat_topic_id: Mapped[int | None] = mapped_column(TelegramId)
     # Топик «Дайджест»: ежедневная сводка по лидам.
     digest_topic_id: Mapped[int | None] = mapped_column(TelegramId)
 

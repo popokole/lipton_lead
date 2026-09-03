@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -39,6 +41,12 @@ class Chat(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     test_mode: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
     members_count: Mapped[int | None] = mapped_column(sa.Integer)
     last_message_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+
+    # Настройки повтора ответов ИИ в этом чате:
+    # {"avoid_repeat_topics": true, "repeat_context_depth": 5}. Пусто — дефолты.
+    reply_settings: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=sa.text("'{}'::jsonb")
+    )
 
     # Аватар чата: кешируем байты, чтобы не дёргать Telegram на каждый показ
     # ленты. avatar_fetched_at отмечает попытку — в том числе неудачную,

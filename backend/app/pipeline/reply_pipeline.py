@@ -22,8 +22,10 @@ ESCALATE_TO_HUMAN. Молча ничего не делать нельзя: в п
 
 from __future__ import annotations
 
+import random
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from app.actions.cooldown import CooldownGuard, CooldownKeys
 from app.actions.engine import ActionEngine, ActionRequest, ActionResult
@@ -128,8 +130,9 @@ class ReplyPipeline:
             )
 
         # Флаги чата: тест-чат снимает все ограничения (можно тестить всегда),
-        # cooldown_exempt — только анти-бан лимит.
-        cooldown_exempt, test_mode = await self._chat_flags(chat_id)
+        # cooldown_exempt — только анти-бан лимит, reply_settings — про
+        # неповторение недавних ответов (см. ниже, у генерации).
+        cooldown_exempt, test_mode, reply_settings = await self._chat_flags(chat_id)
 
         # Анти-бан: не чаще раза в N минут в один чат (группу). Личку не трогаем
         # (там свой one_shot/логика), тест-чаты и cooldown_exempt — без лимита.
@@ -178,6 +181,23 @@ class ReplyPipeline:
                 scenario_id=rule.scenario_id,
             )
 
+            # Технический сбой анализатора (провайдер недоступен, битый ответ)
+            # — это не решение модели, а поломка инфраструктуры. Эскалируем
+            # ВСЕГДА, независимо от human_handoff_enabled: этот флаг про то,
+            # передавать ли человеку по СУЩЕСТВУ (модель не уверена/просит
+            # оператора), а не про то, можно ли молча терять лида при сбое AI.
+            # Иначе confidence=0.00 из _failure() неотличим от «модель
+            # проверила и решила не отвечать» — лид тихо пропадает.
+            if analysis.failed:
+                return await self._escalate(
+                    message,
+                    match,
+                    chat_id,
+                    message_id,
+                    analysis.failure_reason or "AI недоступен",
+                    analysis=analysis,
+                )
+
             # Передача человеку — по флагу сценария. Модель осторожничает и на
             # чувствительных темах (психолог, здоровье) сама поднимает
             # needs_human; для авто-ответа на лиды это выключается в сценарии.
@@ -188,8 +208,6 @@ class ReplyPipeline:
                 # либо модель попросила человека, либо она не уверена.
                 if analysis.result.needs_human:
                     reason = analysis.result.reason or "модель просит передать человеку"
-                elif analysis.failed:
-                    reason = analysis.failure_reason or "AI недоступен"
                 else:
                     reason = (
                         f"низкая уверенность AI "
@@ -199,12 +217,10 @@ class ReplyPipeline:
                     message, match, chat_id, message_id, reason, analysis=analysis
                 )
 
-            # Хендофф выключен, но модель не уверена или отказалась — не выдумываем
-            # ответ, просто пропускаем. Исключение — режим «подтверждать
-            # сомнительные»: если это похоже на лид (relevant), но уверенность в
-            # полосе [review_min, порог), готовим ответ и отдаём его оператору на
-            # подтверждение кнопками, а не молча пропускаем.
-            if analysis.failed or not analysis.passes_threshold or not analysis.result.relevant:
+            # analysis.failed сюда никогда не доходит — сбой уже перехвачен
+            # и эскалирован выше. Здесь только настоящее решение модели:
+            # не уверена или посчитала нерелевантным.
+            if not analysis.passes_threshold or not analysis.result.relevant:
                 conf = analysis.result.confidence
                 review_min = (
                     float(scenario.review_min_confidence)
@@ -214,7 +230,6 @@ class ReplyPipeline:
                 borderline = (
                     scenario is not None
                     and scenario.review_when_uncertain
-                    and not analysis.failed
                     and analysis.result.relevant
                     and review_min <= conf < analysis.threshold
                 )
@@ -282,6 +297,16 @@ class ReplyPipeline:
         # ответ модели: подставляем заготовленный текст или зовём человека.
         knowledge = await self._retrieve_knowledge(scenario, message.text)
 
+        # В группах не примешиваем историю своих прошлых ответов: разным людям
+        # там уместно отвечать похоже, это не выглядит подозрительно так, как в
+        # личном диалоге с одним и тем же человеком. Только личка + настройка чата.
+        avoid_repeat, repeat_depth = _reply_settings(reply_settings)
+        recent_replies = (
+            context.recent_replies[:repeat_depth]
+            if avoid_repeat and message.is_private
+            else ()
+        )
+
         generation = None
         generation_error: str | None = None
         try:
@@ -292,6 +317,7 @@ class ReplyPipeline:
                 knowledge=knowledge,
                 memory=context.memory,
                 conversation_summary=context.summary,
+                recent_replies=recent_replies,
                 account_id=message.account_id,
                 message_id=message_id,
                 scenario_id=scenario.id,
@@ -308,13 +334,19 @@ class ReplyPipeline:
         # Модель может «отказаться», но при этом дать содержательный уточняющий
         # вопрос («напишите город — подберу»). Для авто-ответа это нормальный
         # ответ: если хендофф выключен и текст осмысленный, отправляем его.
+        # Но если это ОБЪЯСНЕНИЕ ОТКАЗА («не могу...»), а не вопрос собеседнику,
+        # его нельзя отправлять в чат — это внутренний текст модели, а не реплика.
         if generation is not None and generation.refused and not scenario.human_handoff_enabled:
             clarification = (
                 generation.reply.refusal_reason
                 if generation.reply and generation.reply.refusal_reason
                 else None
             )
-            if clarification and len(clarification.strip()) >= 8:
+            if (
+                clarification
+                and len(clarification.strip()) >= 8
+                and not _looks_like_policy_refusal(clarification)
+            ):
                 return await self._send(
                     message,
                     match,
@@ -338,8 +370,9 @@ class ReplyPipeline:
                     else "модель не дала ответ"
                 )
             )
-            if scenario.fallback_text:
+            if scenario.fallback_texts:
                 # Заранее написанный человеком текст лучше выдуманного ответа.
+                # Пул, а не один текст: чтобы повторный сбой не звучал как бот.
                 return await self._send(
                     message,
                     match,
@@ -347,7 +380,7 @@ class ReplyPipeline:
                     message_id,
                     context,
                     scenario,
-                    text=scenario.fallback_text,
+                    text=random.choice(scenario.fallback_texts),
                     used_knowledge=False,
                     cooldown_keys=cooldown_keys,
                     analysis=analysis,
@@ -659,10 +692,12 @@ class ReplyPipeline:
         await self._cooldown.claim_once(f"dup:{account_id}:{vdigest}", ttl)
         return varied
 
-    async def _chat_flags(self, chat_id: uuid.UUID | None) -> tuple[bool, bool]:
-        """(cooldown_exempt, test_mode) чата за один запрос."""
+    async def _chat_flags(
+        self, chat_id: uuid.UUID | None
+    ) -> tuple[bool, bool, dict[str, Any]]:
+        """(cooldown_exempt, test_mode, reply_settings) чата за один запрос."""
         if chat_id is None:
-            return False, False
+            return False, False, {}
         from sqlalchemy import select
 
         from app.models import Chat
@@ -670,12 +705,14 @@ class ReplyPipeline:
         async with self._database.session() as db:
             row = (
                 await db.execute(
-                    select(Chat.cooldown_exempt, Chat.test_mode).where(Chat.id == chat_id)
+                    select(Chat.cooldown_exempt, Chat.test_mode, Chat.reply_settings).where(
+                        Chat.id == chat_id
+                    )
                 )
             ).first()
         if row is None:
-            return False, False
-        return bool(row.cooldown_exempt), bool(row.test_mode)
+            return False, False, {}
+        return bool(row.cooldown_exempt), bool(row.test_mode), dict(row.reply_settings or {})
 
     async def _already_contacted(self, account_id: uuid.UUID, peer_tg_id: int) -> bool:
         """Отвечали ли этому собеседнику раньше (лид заводится на первом ответе)."""
@@ -738,6 +775,43 @@ class ReplyPipeline:
             if variant is None:
                 return None
             return variant.id, variant.text
+
+
+_POLICY_REFUSAL_PREFIXES = (
+    "не могу",
+    "я не могу",
+    "не в состоянии",
+    "не буду",
+    "я не буду",
+    "не готова",
+    "не готов",
+    "sorry",
+    "i cannot",
+    "i can't",
+    "i'm unable",
+    "i am unable",
+)
+
+
+def _looks_like_policy_refusal(text: str) -> bool:
+    """True, если это объяснение отказа модели, а не реплика собеседнику.
+
+    Модель иногда кладёт в refusal_reason не уточняющий вопрос, а сырое
+    объяснение «почему я не могу это сделать» — такой текст никогда не
+    должен уйти в реальный чат.
+    """
+    lowered = text.strip().lower()
+    return lowered.startswith(_POLICY_REFUSAL_PREFIXES)
+
+
+def _reply_settings(raw: dict[str, Any]) -> tuple[bool, int]:
+    """(avoid_repeat_topics, repeat_context_depth) с дефолтами и границами."""
+    avoid = bool(raw.get("avoid_repeat_topics", True))
+    try:
+        depth = int(raw.get("repeat_context_depth", 5))
+    except (TypeError, ValueError):
+        depth = 5
+    return avoid, max(0, min(5, depth))
 
 
 _VARY_TAILS = (")", " 🙂", "", ".", " 🫶", "", " )", "..")

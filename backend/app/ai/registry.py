@@ -19,11 +19,22 @@ def build_provider(settings: Settings) -> AIProvider:
     if name == "openai":
         from app.ai.openai_provider import OpenAIProvider
 
-        return OpenAIProvider(settings)
+        primary: AIProvider = OpenAIProvider(settings)
+    else:
+        raise AIError(
+            f"Неизвестный AI_PROVIDER: {settings.ai_provider!r}. Доступные: {', '.join(PROVIDERS)}"
+        )
 
-    raise AIError(
-        f"Неизвестный AI_PROVIDER: {settings.ai_provider!r}. Доступные: {', '.join(PROVIDERS)}"
-    )
+    # Резерв подключается сам по себе, когда задан ANTHROPIC_API_KEY: отдельный
+    # путь до api.anthropic.com не зависит от сбоев/перегрузки основного
+    # агрегатора (см. app/ai/fallback_provider.py).
+    if settings.anthropic_api_key is not None:
+        from app.ai.anthropic_provider import AnthropicProvider
+        from app.ai.fallback_provider import FallbackProvider
+
+        return FallbackProvider(primary, AnthropicProvider(settings))
+
+    return primary
 
 
 def provider_is_configured(settings: Settings) -> bool:

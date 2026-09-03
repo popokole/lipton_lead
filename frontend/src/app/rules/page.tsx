@@ -43,6 +43,7 @@ export default function RulesPage() {
   const [threshold, setThreshold] = useState('0.8');
   const [cooldown, setCooldown] = useState('600');
   const [priority, setPriority] = useState('100');
+  const [notifyTopicEnabled, setNotifyTopicEnabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -71,6 +72,7 @@ export default function RulesPage() {
         cooldown: { user: Number(cooldown) || 0 },
         action,
         account_ids: accountIds,
+        notify_topic_enabled: notifyTopicEnabled,
       });
       setName('');
       await rules.reload();
@@ -84,6 +86,15 @@ export default function RulesPage() {
   async function toggle(rule: Rule) {
     try {
       await api.patch(`/rules/${rule.id}`, { enabled: !rule.enabled });
+      await rules.reload();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    }
+  }
+
+  async function toggleTopic(rule: Rule) {
+    try {
+      await api.patch(`/rules/${rule.id}`, { notify_topic_enabled: !rule.notify_topic_enabled });
       await rules.reload();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
@@ -221,6 +232,15 @@ export default function RulesPage() {
             />
             Проверять сообщение через AI
           </label>
+          <label className="flex items-end gap-2 pb-2 text-sm text-slate-400">
+            <input
+              type="checkbox"
+              checked={notifyTopicEnabled}
+              onChange={(e) => setNotifyTopicEnabled(e.target.checked)}
+              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
+            />
+            Свой топик в уведомлениях (иначе — общий «Общение ИИ»)
+          </label>
         </div>
         <div className="mt-4">
           <Button onClick={create} disabled={busy || !name.trim()}>
@@ -266,9 +286,16 @@ export default function RulesPage() {
                   {rule.enabled ? <Badge tone="ok">включено</Badge> : <Badge>выключено</Badge>}
                 </td>
                 <td className="py-3">
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <Button variant="ghost" onClick={() => toggle(rule)}>
                       {rule.enabled ? 'Выключить' : 'Включить'}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      onClick={() => toggleTopic(rule)}
+                      title="Свой топик в форум-группе уведомлений вместо общего «Общение ИИ»"
+                    >
+                      {rule.notify_topic_enabled ? '📌 топик свой' : '📌 топик общий'}
                     </Button>
                     <Button variant="danger" onClick={() => remove(rule)}>
                       Удалить

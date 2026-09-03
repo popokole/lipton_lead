@@ -1,20 +1,29 @@
 'use client';
 
+import { createContext, useCallback, useContext, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
+
+const CARD_TONES: Record<string, string> = {
+  secondary: 'border-ink-700 bg-ink-900',
+  primary: 'border-accent/40 bg-accent-soft',
+  info: 'border-sky-500/30 bg-sky-500/[0.06]',
+};
 
 export function Card({
   title,
   actions,
   children,
   className = '',
+  tone = 'secondary',
 }: {
   title?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
   className?: string;
+  tone?: 'secondary' | 'primary' | 'info';
 }) {
   return (
-    <section className={`rounded-xl border border-ink-700 bg-ink-900 ${className}`}>
+    <section className={`rounded-xl border ${CARD_TONES[tone] ?? CARD_TONES.secondary} ${className}`}>
       {(title || actions) && (
         <header className="flex items-center justify-between gap-4 border-b border-ink-700 px-5 py-3">
           <h2 className="text-sm font-medium text-slate-200">{title}</h2>
@@ -26,7 +35,7 @@ export function Card({
   );
 }
 
-export function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: string }) {
+export function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: ReactNode }) {
   return (
     <div className="rounded-xl border border-ink-700 bg-ink-900 px-5 py-4">
       <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
@@ -59,6 +68,7 @@ export function Button({
   variant = 'primary',
   disabled,
   className = '',
+  title,
 }: {
   children: ReactNode;
   onClick?: () => void;
@@ -66,6 +76,7 @@ export function Button({
   variant?: 'primary' | 'ghost' | 'danger';
   disabled?: boolean;
   className?: string;
+  title?: string;
 }) {
   const styles = {
     primary: 'bg-accent text-white hover:bg-accent/85',
@@ -78,6 +89,7 @@ export function Button({
       type={type}
       onClick={onClick}
       disabled={disabled}
+      title={title}
       className={`inline-flex min-h-9 items-center justify-center whitespace-nowrap rounded-lg px-4 py-2 text-sm font-medium transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${styles} ${className}`}
     >
       {children}
@@ -202,6 +214,122 @@ export function BarChart({ points, color = '#4f8cff' }: { points: { day: string;
       ))}
     </div>
   );
+}
+
+const STATUS_DOT: Record<string, string> = {
+  ok: 'bg-success',
+  warn: 'bg-warning',
+  bad: 'bg-danger',
+  info: 'bg-sky-400',
+  mute: 'bg-slate-500',
+};
+
+export function StatusBadge({
+  children,
+  tone = 'mute',
+  pulse = false,
+}: {
+  children: ReactNode;
+  tone?: keyof typeof TONES;
+  pulse?: boolean;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs text-slate-400">
+      <span className="relative flex h-2 w-2">
+        {pulse && (
+          <span
+            className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 ${STATUS_DOT[tone] ?? STATUS_DOT.mute}`}
+          />
+        )}
+        <span
+          className={`relative inline-flex h-2 w-2 rounded-full ${STATUS_DOT[tone] ?? STATUS_DOT.mute}`}
+        />
+      </span>
+      {children}
+    </span>
+  );
+}
+
+export function Skeleton({ className = '' }: { className?: string }) {
+  return <div className={`animate-skeleton-pulse rounded-md bg-ink-700 ${className}`} />;
+}
+
+export function EmptyState({
+  icon,
+  title,
+  description,
+  action,
+}: {
+  icon?: ReactNode;
+  title: string;
+  description?: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-2 py-10 text-center">
+      {icon && <div className="text-2xl text-slate-600">{icon}</div>}
+      <div className="text-sm font-medium text-slate-300">{title}</div>
+      {description && <p className="max-w-sm text-xs text-slate-500">{description}</p>}
+      {action && <div className="mt-2">{action}</div>}
+    </div>
+  );
+}
+
+export function Trend({ current, previous }: { current: number; previous: number }) {
+  if (previous === 0) return null;
+  const pct = Math.round(((current - previous) / previous) * 100);
+  if (pct === 0) return <span className="text-xs text-slate-500">без изменений</span>;
+  const up = pct > 0;
+  return (
+    <span className={`text-xs font-medium ${up ? 'text-success' : 'text-danger'}`}>
+      {up ? '↑' : '↓'} {Math.abs(pct)}% к пред. дню
+    </span>
+  );
+}
+
+interface Toast {
+  id: number;
+  text: string;
+  tone: 'ok' | 'bad' | 'info';
+}
+
+const ToastContext = createContext<((text: string, tone?: Toast['tone']) => void) | null>(null);
+
+export function ToastProvider({ children }: { children: ReactNode }) {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  const push = useCallback((text: string, tone: Toast['tone'] = 'info') => {
+    const id = Date.now() + Math.random();
+    setToasts((prev) => [...prev, { id, text, tone }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+  }, []);
+
+  const toneClass: Record<Toast['tone'], string> = {
+    ok: 'border-success/40 bg-success/10 text-success',
+    bad: 'border-danger/40 bg-danger/10 text-danger',
+    info: 'border-accent/40 bg-accent-soft text-slate-100',
+  };
+
+  return (
+    <ToastContext.Provider value={push}>
+      {children}
+      <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex flex-col gap-2">
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className={`pointer-events-auto rounded-lg border px-4 py-2.5 text-sm shadow-lg ${toneClass[toast.tone]}`}
+          >
+            {toast.text}
+          </div>
+        ))}
+      </div>
+    </ToastContext.Provider>
+  );
+}
+
+export function useToast(): (text: string, tone?: Toast['tone']) => void {
+  const ctx = useContext(ToastContext);
+  return useMemo(() => ctx ?? (() => undefined), [ctx]);
 }
 
 export function statusTone(status: string): keyof typeof TONES {
