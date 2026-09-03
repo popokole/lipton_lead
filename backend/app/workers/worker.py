@@ -51,6 +51,7 @@ from app.database.repositories.workers import WorkerRepository
 from app.models import AccountStatus, ActionType, WorkerStatus
 from app.notifications.notifier import NotifierBot
 from app.pipeline.monitor_pipeline import MonitorPipeline
+from app.pipeline.reconcile import ChatReconciler
 from app.pipeline.reply_pipeline import ReplyPipeline
 from app.rules.engine import RuleEngine
 from app.rules.filters import SelfGuard, StopGuard
@@ -101,6 +102,7 @@ class Worker:
             self.runtime.database, default_user_cooldown=settings.default_cooldown_seconds
         )
         self._pipeline: MonitorPipeline | None = None
+        self._reconciler: ChatReconciler | None = None
         self._clients = ClientManager(
             settings,
             self._factory,
@@ -129,6 +131,7 @@ class Worker:
             asyncio.create_task(self._review_poll_loop(), name="worker-review"),
             asyncio.create_task(self._approved_review_loop(), name="worker-review-exec"),
             asyncio.create_task(self._digest_loop(), name="worker-digest"),
+            asyncio.create_task(self._reconcile_loop(), name="worker-reconcile"),
         ]
         self.set_status(STATUS_HEALTHY)
         await self._sync_status_to_db()
@@ -169,6 +172,7 @@ class Worker:
             peers=self._peers,
             stop_guard=self._stop_guard,
         )
+        self._reconciler = ChatReconciler(self.runtime.database, self._clients, self._pipeline)
         self._commands = CommandConsumer(redis, str(self.worker_id))
         self._handler = CommandHandler(
             settings,
@@ -563,6 +567,22 @@ class Worker:
                 token, group_id = loaded
                 note = "✅ Отправлено из панели" if ok else f"⚠️ Не удалось: {detail[:80]}"
                 await self._notifier.finalize_review_card(token, group_id, message_id, note)
+
+    async def _reconcile_loop(self) -> None:
+        """Раз в reconcile_interval_seconds довыгружает пропущенные сообщения
+        недавно активных чатов — страховка от сбоев pts-синхронизации
+        Telegram, которую нельзя починить на клиенте (см. app/pipeline/reconcile.py)."""
+        interval = self.runtime.settings.reconcile_interval_seconds
+        while not self._stop.is_set():
+            try:
+                if self._reconciler is not None:
+                    for account_id in list(self._clients.account_ids):
+                        await self._reconciler.run(account_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — один сбой не должен ронять цикл
+                logger.warning("reconcile_loop_failed", detail=str(exc)[:150])
+            await self._sleep(interval)
 
     async def _digest_loop(self) -> None:
         """Раз в день шлёт сводку по лидам в лог-чат (в digest_hour)."""

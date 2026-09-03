@@ -166,6 +166,11 @@ class Settings(BaseSettings):
     digest_hour: int = Field(default=21, ge=0, le=23, alias="DIGEST_HOUR")
     summary_every_n_messages: int = Field(default=15, ge=1, alias="SUMMARY_EVERY_N_MESSAGES")
     duplicate_window_seconds: int = Field(default=86400, ge=1, alias="DUPLICATE_WINDOW_SECONDS")
+    # Довыгрузка пропущенных сообщений (см. app/pipeline/reconcile.py) — раз в
+    # это время по всем аккаунтам воркера. Достаточно часто, чтобы забой
+    # pts-синхронизации Telegram не терял сообщения надолго, и достаточно
+    # редко, чтобы не гонять iter_messages без нужды.
+    reconcile_interval_seconds: int = Field(default=120, ge=10, alias="RECONCILE_INTERVAL_SECONDS")
 
     # --- Knowledge base ----------------------------------------------------
     kb_max_file_size_mb: int = Field(default=20, ge=1, alias="KB_MAX_FILE_SIZE_MB")
