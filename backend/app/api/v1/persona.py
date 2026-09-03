@@ -19,12 +19,27 @@ class PersonaOut(BaseModel):
     enabled: bool
     character: str | None
     examples: str | None
+    # Глобальные настройки «в целом» — действуют всегда, вне зависимости от enabled.
+    base_rules: str | None
+    max_reply_length: int | None
 
 
 class PersonaUpdate(BaseModel):
     enabled: bool | None = None
     character: str | None = Field(default=None, max_length=20000)
     examples: str | None = Field(default=None, max_length=20000)
+    base_rules: str | None = Field(default=None, max_length=20000)
+    max_reply_length: int | None = Field(default=None, ge=0, le=100000)
+
+
+def _to_out(row: Persona) -> PersonaOut:
+    return PersonaOut(
+        enabled=row.enabled,
+        character=row.character,
+        examples=row.examples,
+        base_rules=row.base_rules,
+        max_reply_length=row.max_reply_length,
+    )
 
 
 async def _get_or_create(db: DbDep) -> Persona:
@@ -39,7 +54,7 @@ async def _get_or_create(db: DbDep) -> Persona:
 @router.get("", response_model=PersonaOut, summary="Личность собеседника")
 async def get_persona(_user: CurrentUser, db: DbDep) -> PersonaOut:
     row = await _get_or_create(db)
-    return PersonaOut(enabled=row.enabled, character=row.character, examples=row.examples)
+    return _to_out(row)
 
 
 @router.put("", response_model=PersonaOut, summary="Сохранить личность")
@@ -51,5 +66,10 @@ async def update_persona(payload: PersonaUpdate, _admin: AdminUser, db: DbDep) -
         row.character = payload.character.strip() or None
     if payload.examples is not None:
         row.examples = payload.examples.strip() or None
+    if payload.base_rules is not None:
+        row.base_rules = payload.base_rules.strip() or None
+    if payload.max_reply_length is not None:
+        # 0 — «без общего ограничения» (то же, что пусто).
+        row.max_reply_length = payload.max_reply_length or None
     await db.flush()
-    return PersonaOut(enabled=row.enabled, character=row.character, examples=row.examples)
+    return _to_out(row)

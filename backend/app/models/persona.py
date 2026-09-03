@@ -33,3 +33,11 @@ class Persona(TimestampMixin, Base):
     character: Mapped[str | None] = mapped_column(sa.Text)
     # Примеры переписки — «история» того, как он пишет. Few-shot, задаёт стиль.
     examples: Mapped[str | None] = mapped_column(sa.Text)
+
+    # Глобальный базовый промпт («в целом»): общие правила ответа для ВСЕХ
+    # сценариев. Если задан — заменяет зашитые GENERATOR_BASE_RULES. Применяется
+    # всегда, независимо от переключателя личности.
+    base_rules: Mapped[str | None] = mapped_column(sa.Text)
+    # Глобальная максимальная длина ответа (символов). Используется, когда у
+    # сценария своя длина не задана. Пусто — без общего ограничения.
+    max_reply_length: Mapped[int | None] = mapped_column(sa.Integer)

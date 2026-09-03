@@ -96,7 +96,14 @@ def build_analyze_messages(request: AnalyzeRequest) -> list[ChatMessage]:
 
 
 def build_generate_messages(request: GenerateRequest) -> list[ChatMessage]:
-    system_parts = [request.system_prompt.strip(), GENERATOR_BASE_RULES]
+    # Базовые правила «в целом»: если оператор задал глобальный промпт в панели,
+    # он заменяет зашитые правила; иначе берём дефолтные GENERATOR_BASE_RULES.
+    base_rules = (
+        request.base_rules.strip()
+        if request.base_rules and request.base_rules.strip()
+        else GENERATOR_BASE_RULES
+    )
+    system_parts = [request.system_prompt.strip(), base_rules]
 
     # Личность идёт ПОСЛЕ правил сценария и общих правил: она задаёт голос, а
     # не отменяет их. Примеры переписки — few-shot, перенимаем тон, не копируем.

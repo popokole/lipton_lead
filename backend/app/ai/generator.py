@@ -40,6 +40,21 @@ PERSONA_CACHE_TTL = 30.0
 
 
 @dataclass(frozen=True, slots=True)
+class _PersonaCfg:
+    """Глобальные настройки, подмешиваемые в каждую генерацию.
+
+    character/examples — «личность», действуют только когда она включена.
+    base_rules/max_reply_length — общие «в целом» правила и длина, действуют
+    всегда (это отдельные настройки, не привязанные к переключателю личности).
+    """
+
+    character: str | None = None
+    examples: str | None = None
+    base_rules: str | None = None
+    max_reply_length: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class GenerationOutcome:
     reply: GeneratedReply | None
     usage: Usage
@@ -81,32 +96,37 @@ class AIGenerator:
         self._budget = budget
         self._recorder = recorder
         self._database = database
-        self._persona: tuple[str | None, str | None] = (None, None)
+        self._persona: _PersonaCfg = _PersonaCfg()
         self._persona_at: float | None = None
 
-    async def _load_persona(self) -> tuple[str | None, str | None]:
-        """Возвращает (характер, примеры) включённой личности или (None, None).
+    async def _load_persona(self) -> _PersonaCfg:
+        """Глобальные настройки генерации из синглтона persona.
 
-        Кэшируется на PERSONA_CACHE_TTL секунд: правка личности в панели
-        применяется в течение полуминуты, без похода в базу на каждый ответ.
+        Кэшируется на PERSONA_CACHE_TTL секунд: правка в панели применяется в
+        течение полуминуты, без похода в базу на каждый ответ. Характер и
+        примеры отдаём только при включённой личности; базовый промпт и общую
+        длину — всегда (это независимые настройки «в целом»).
         """
         now = get_clock().monotonic()
         if self._persona_at is not None and now - self._persona_at < PERSONA_CACHE_TTL:
             return self._persona
 
-        character: str | None = None
-        examples: str | None = None
+        cfg = _PersonaCfg()
         try:
             async with self._database.session() as db:
                 row = await db.get(Persona, PERSONA_ID)
-            if row is not None and row.enabled:
-                character = row.character
-                examples = row.examples
+            if row is not None:
+                cfg = _PersonaCfg(
+                    character=row.character if row.enabled else None,
+                    examples=row.examples if row.enabled else None,
+                    base_rules=row.base_rules,
+                    max_reply_length=row.max_reply_length,
+                )
         except Exception as exc:  # noqa: BLE001 — личность не важнее ответа
             logger.warning("persona_load_failed", detail=str(exc)[:200])
             return self._persona  # отдаём прошлое значение, не роняем генерацию
 
-        self._persona = (character, examples)
+        self._persona = cfg
         self._persona_at = now
         return self._persona
 
@@ -135,7 +155,7 @@ class AIGenerator:
                 failure_reason="в базе знаний нет данных для ответа",
             )
 
-        persona, persona_examples = await self._load_persona()
+        cfg = await self._load_persona()
 
         request = GenerateRequest(
             system_prompt=scenario.system_prompt,
@@ -146,9 +166,11 @@ class AIGenerator:
             conversation_summary=conversation_summary,
             require_grounding=scenario.require_grounding,
             reply_in_dm=scenario.reply_in_dm,
-            persona=persona,
-            persona_examples=persona_examples,
-            max_reply_length=scenario.max_reply_length,
+            persona=cfg.character,
+            persona_examples=cfg.examples,
+            base_rules=cfg.base_rules,
+            # Длина сценария приоритетнее; если у него не задана — берём общую.
+            max_reply_length=scenario.max_reply_length or cfg.max_reply_length,
             model=scenario.model,
             temperature=scenario.temperature,
             max_tokens=scenario.max_tokens,

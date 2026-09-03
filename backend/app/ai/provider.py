@@ -172,6 +172,9 @@ class GenerateRequest(BaseModel):
     # промпта сценария — задают, КАК звучит ответ, не меняя, ЧТО отвечать.
     persona: str | None = None
     persona_examples: str | None = None
+    # Глобальный базовый промпт «в целом»: если задан, заменяет зашитые общие
+    # правила ответа (GENERATOR_BASE_RULES).
+    base_rules: str | None = None
     max_reply_length: int | None = None
     model: str | None = None
     temperature: float | None = None

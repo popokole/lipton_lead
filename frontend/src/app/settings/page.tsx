@@ -186,6 +186,8 @@ interface PersonaState {
   enabled: boolean;
   character: string | null;
   examples: string | null;
+  base_rules: string | null;
+  max_reply_length: number | null;
 }
 
 /** Глобальная «личность» ИИ: характер и примеры переписки. */
@@ -193,6 +195,8 @@ function PersonaCard() {
   const [enabled, setEnabled] = useState(false);
   const [character, setCharacter] = useState('');
   const [examples, setExamples] = useState('');
+  const [baseRules, setBaseRules] = useState('');
+  const [maxLen, setMaxLen] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -204,6 +208,8 @@ function PersonaCard() {
         setEnabled(p.enabled);
         setCharacter(p.character ?? '');
         setExamples(p.examples ?? '');
+        setBaseRules(p.base_rules ?? '');
+        setMaxLen(p.max_reply_length != null ? String(p.max_reply_length) : '');
       } catch (err) {
         setError(err instanceof ApiError ? err.message : String(err));
       }
@@ -275,6 +281,51 @@ function PersonaCard() {
         <span className="text-xs text-slate-500">
           {enabled ? 'личность применяется ко всем ответам' : 'выключена — отвечаем только по сценарию'}
         </span>
+      </div>
+
+      <div className="mt-6 border-t border-ink-800 pt-5">
+        <h3 className="mb-1 text-sm font-semibold text-slate-200">Общие правила и длина ответа</h3>
+        <p className="mb-4 text-sm text-slate-400">
+          Действуют <b>в целом</b>, поверх всех сценариев и <b>всегда</b> — даже если личность
+          выключена. Базовый промпт заменяет стандартные правила ответа; длина применяется, если у
+          сценария своя не задана (у сценария она приоритетнее).
+        </p>
+        <div className="grid gap-4">
+          <Field
+            label="Базовый промпт (стиль и правила для всех ответов)"
+            hint="Пусто — используются стандартные зашитые правила"
+          >
+            <textarea
+              className={`${inputClass} min-h-40 resize-y`}
+              value={baseRules}
+              onChange={(e) => setBaseRules(e.target.value)}
+              placeholder={
+                'например: пиши как живой человек, коротко, с маленькой буквы, без длинных тире, не раскрывай что ты ии, если чего-то не знаешь — импровизируй, не пиши что нет данных…'
+              }
+            />
+          </Field>
+          <Field
+            label="Максимальная длина ответа (в целом)"
+            hint="Символов; пусто или 0 — без общего ограничения"
+          >
+            <input
+              className={inputClass}
+              value={maxLen}
+              onChange={(e) => setMaxLen(e.target.value.replace(/\D/g, ''))}
+              placeholder="например 300"
+            />
+          </Field>
+        </div>
+        <div className="mt-4">
+          <Button
+            disabled={busy}
+            onClick={() =>
+              save({ base_rules: baseRules, max_reply_length: maxLen ? Number(maxLen) : 0 })
+            }
+          >
+            {busy ? 'Сохраняем…' : 'Сохранить общие'}
+          </Button>
+        </div>
       </div>
     </Card>
   );
