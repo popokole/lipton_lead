@@ -1,7 +1,7 @@
 """persona: глобальный базовый промпт и общая макс. длина ответа
 
-Revision ID: qq15personabase
-Revises: pp14testmode
+Revision ID: tt18personabase
+Revises: ss17replyset
 Create Date: 2026-09-03
 """
 
@@ -12,8 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "qq15personabase"
-down_revision: str | None = "pp14testmode"
+revision: str = "tt18personabase"
+down_revision: str | None = "ss17replyset"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
