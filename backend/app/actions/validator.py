@@ -53,7 +53,6 @@ class ValidationContext:
     min_length: int = 2
     banned_phrases: tuple[str, ...] = ()
     required_links: tuple[str, ...] = ()
-    recent_replies: tuple[str, ...] = ()
     ai_replies_in_row: int = 0
     max_replies_in_row: int = 3
 
@@ -166,14 +165,6 @@ def check_grounding(context: ValidationContext) -> CheckResult:
     return _result("grounding", True)
 
 
-def check_no_duplicate(context: ValidationContext) -> CheckResult:
-    normalized = _normalize(context.text)
-    for previous in context.recent_replies:
-        if _normalize(previous) == normalized:
-            return _result("no_duplicate", False, "такой ответ уже отправлялся")
-    return _result("no_duplicate", True)
-
-
 def check_no_self_loop(context: ValidationContext) -> CheckResult:
     """Ограничение подряд идущих ответов без реплики собеседника (ТЗ §9)."""
     if context.ai_replies_in_row >= context.max_replies_in_row:
@@ -194,7 +185,6 @@ DEFAULT_CHECKS: tuple[Check, ...] = (
     check_no_placeholders,
     check_required_links,
     check_grounding,
-    check_no_duplicate,
     check_no_self_loop,
 )
 
@@ -219,7 +209,3 @@ class ReplyValidator:
                 reason=verdict.first_failure,
             )
         return verdict
-
-
-def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip().lower())

@@ -103,20 +103,6 @@ class TestGrounding:
         assert validate(text="Смотрите https://example.com").passed is True
 
 
-class TestDuplicates:
-    def test_identical_reply_is_rejected(self) -> None:
-        verdict = validate(recent_replies=(GOOD_REPLY,))
-        assert verdict.passed is False
-        assert {check.name for check in verdict.failures} >= {"no_duplicate"}
-
-    def test_whitespace_and_case_differences_still_count_as_duplicate(self) -> None:
-        verdict = validate(recent_replies=("  " + GOOD_REPLY.upper() + "  ",))
-        assert verdict.passed is False
-
-    def test_different_reply_passes(self) -> None:
-        assert validate(recent_replies=("Совершенно другой ответ",)).passed is True
-
-
 class TestSelfLoop:
     def test_too_many_replies_in_a_row_stops_the_send(self) -> None:
         """Иначе система переписывается сама с собой (ТЗ §9)."""

@@ -430,7 +430,6 @@ class ReplyPipeline:
                 used_knowledge=used_knowledge,
                 require_grounding=scenario.require_knowledge_grounding,
                 max_length=scenario.max_reply_length or self._settings.max_message_length,
-                recent_replies=context.recent_replies,
                 ai_replies_in_row=context.ai_replies_in_row,
                 max_replies_in_row=self._settings.max_consecutive_ai_replies,
             )
