@@ -24,11 +24,12 @@ from redis.asyncio import Redis
 from sqlalchemy import delete
 
 from app.actions.cooldown import CooldownGuard
-from app.actions.engine import ActionEngine
+from app.actions.engine import ActionEngine, ActionRequest, ActionResult
 from app.actions.handlers import EscalateToHumanHandler, IgnoreHandler
 from app.actions.validator import ReplyValidator
 from app.ai.analyzer import AnalysisOutcome
-from app.ai.provider import AnalysisResult, Intent, Usage
+from app.ai.generator import GenerationOutcome
+from app.ai.provider import AnalysisResult, GeneratedReply, Intent, Usage
 from app.bus.messages import Event
 from app.conversations.context import ContextBuilder
 from app.core.config import Settings
@@ -36,6 +37,7 @@ from app.database.session import Database
 from app.models import (
     Account,
     AccountStatus,
+    ActionStatus,
     ActionType,
     Chat,
     ChatType,
@@ -105,6 +107,45 @@ def _low_confidence_outcome(threshold: float = 0.7) -> AnalysisOutcome:
     )
 
 
+def _confident_outcome(threshold: float = 0.7) -> AnalysisOutcome:
+    """Уверенное решение модели — конвейер должен дойти до генерации и отправки."""
+    return AnalysisOutcome(
+        result=AnalysisResult(
+            relevant=True,
+            confidence=0.95,
+            intent=Intent.SERVICE_REQUEST,
+            should_reply=True,
+            needs_human=False,
+            reason="явный запрос",
+        ),
+        usage=Usage(),
+        threshold=threshold,
+        failed=False,
+    )
+
+
+class _StubGenerator:
+    """Всегда успешно генерирует ответ — сбой в этих тестах имитирует
+    сама отправка (ActionEngine/Telethon), а не AI."""
+
+    async def generate(self, _scenario: object, **_kwargs: object) -> GenerationOutcome:
+        return GenerationOutcome(
+            reply=GeneratedReply(text="Здравствуйте! Подскажем."), usage=Usage()
+        )
+
+
+class _FailingReplyHandler:
+    """Имитирует падение Telethon при отправке (регрессия 2026-09-04:
+    TypeNotFoundError на битом TL-объекте где-то в апдейтах)."""
+
+    async def execute(self, request: ActionRequest, action_id: object) -> ActionResult:
+        return ActionResult(
+            status=ActionStatus.FAILED,
+            action_id=action_id,  # type: ignore[arg-type]
+            detail="TypeNotFoundError: Could not find a matching Constructor ID",
+        )
+
+
 @dataclass
 class Env:
     database: Database
@@ -152,7 +193,12 @@ async def env(integration_settings: Settings, redis_client: Redis) -> AsyncItera
 
 
 async def _run(
-    env: Env, scenario: Scenario, outcome: AnalysisOutcome
+    env: Env,
+    scenario: Scenario,
+    outcome: AnalysisOutcome,
+    *,
+    generator: object | None = None,
+    reply_handler: object | None = None,
 ) -> tuple[ReplyOutcome, RecordingPublisher]:
     publisher = RecordingPublisher()
     actions = ActionEngine(env.database)
@@ -161,6 +207,8 @@ async def _run(
         EscalateToHumanHandler(env.database, publisher),  # type: ignore[arg-type]
     )
     actions.register(ActionType.IGNORE, IgnoreHandler(env.database))
+    if reply_handler is not None:
+        actions.register(ActionType.REPLY, reply_handler)  # type: ignore[arg-type]
 
     db_rule = Rule(
         name="психолог Тест (integration)",
@@ -185,7 +233,7 @@ async def _run(
         settings,
         env.database,
         analyzer=_StubAnalyzer(outcome),  # type: ignore[arg-type]
-        generator=None,
+        generator=generator,  # type: ignore[arg-type]
         context=ContextBuilder(settings, env.database),
         validator=ReplyValidator(),
         cooldown=CooldownGuard(env.redis_client),
@@ -260,3 +308,28 @@ class TestAnalysisFailureEscalates:
         outcome, _ = await _run(env, scenario, _low_confidence_outcome())
 
         assert outcome.action is ActionType.IGNORE
+
+
+class TestSendFailureEscalates:
+    """Регрессия на инцидент 2026-09-04: Telethon уронил RPC отправки ответа
+    (TypeNotFoundError на неизвестном TL-объекте), лид был корректно
+    проанализирован и сгенерирован ответ — но отправка молча осела статусом
+    FAILED, и оператор об этом не узнал (см. app/pipeline/reply_pipeline.py)."""
+
+    async def test_send_failure_escalates_even_with_handoff_disabled(self, env: Env) -> None:
+        scenario = Scenario(
+            name=f"send-fail-test-{uuid.uuid4().hex[:8]}",
+            system_prompt="ты ассистент по VPN",
+            human_handoff_enabled=False,
+        )
+        outcome, publisher = await _run(
+            env,
+            scenario,
+            _confident_outcome(),
+            generator=_StubGenerator(),
+            reply_handler=_FailingReplyHandler(),
+        )
+
+        assert outcome.action is ActionType.ESCALATE_TO_HUMAN
+        assert "Constructor" in (outcome.reason or "")
+        assert any(e.type.value == "human.handoff" for e in publisher.events)

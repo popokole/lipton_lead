@@ -541,6 +541,22 @@ class ReplyPipeline:
             # Ответ не ушёл — задержку надо снять, иначе следующая попытка
             # окажется заблокированной несостоявшимся ответом.
             await self._cooldown.release(claim)
+            # Технический сбой ОТПРАВКИ (напр. Telethon уронил RPC на битом
+            # TL-объекте, см. инцидент 2026-09-04) — тот же принцип, что и для
+            # analysis.failed выше: это поломка инфраструктуры, а не решение
+            # модели, и лид уже отработан (анализ прошёл, ответ сгенерирован).
+            # Без явной эскалации это молча оседает статусом FAILED и никто,
+            # кроме самого оператора, листающего панель, об этом не узнает.
+            return await self._escalate(
+                message,
+                match,
+                chat_id,
+                message_id,
+                f"не удалось отправить ответ: {result.detail}",
+                analysis=analysis,
+                validation=verdict,
+                conversation_id=context.conversation_id,
+            )
 
         return ReplyOutcome(
             action=ActionType.REPLY,
