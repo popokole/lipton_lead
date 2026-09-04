@@ -53,9 +53,15 @@ class TelegramClientLike(Protocol):
     async def get_dialogs(self, limit: int | None = None) -> Any: ...
 
     def iter_messages(
-        self, entity: Any, *, limit: int | None = None
+        self, entity: Any, *, limit: int | None = None, offset_id: int = 0
     ) -> AsyncIterator[Any]:
-        """Обычная выгрузка истории (не pts-дельта) — см. app/pipeline/reconcile.py."""
+        """Обычная выгрузка истории (не pts-дельта) — см. app/pipeline/reconcile.py.
+
+        offset_id вместе с маленьким limit — обязательное сочетание в
+        реконсайлере: Telethon декодирует ответ GetHistory как один атомарный
+        объект, и один неизвестный TL-конструктор где угодно внутри валит
+        разбор всего ответа целиком, а не одного сообщения.
+        """
         ...
 
     async def get_entity(self, entity: Any) -> Any: ...

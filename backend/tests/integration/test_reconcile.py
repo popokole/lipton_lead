@@ -248,3 +248,38 @@ class TestReconcile:
         recovered = await env.reconciler.run(uuid.uuid4())
 
         assert recovered == 0
+
+    async def test_survives_a_poisoned_batch_by_keeping_the_newer_ones(
+        self, env: ReconcileEnv
+    ) -> None:
+        """Регрессия на боевой инцидент 2026-09-04: Telethon не смог разобрать
+        один TL-объект в истории (новый тип реакции — schema не поспела за
+        Telegram) и раньше это топило ВСЮ выгрузку чата целиком, включая
+        нормальные сообщения свежее сбойного места. Мелкие пачки (см.
+        _fetch_recent) должны терять только сбойную пачку, а не всё окно."""
+        reconciler = ChatReconciler(
+            env.database,
+            ClientLookupStub(env.client, env.account_id),
+            env.pipeline,
+            lookback_messages=30,
+            active_within_minutes=30,
+            fetch_batch_size=2,
+        )
+        env.client.history = [
+            FakeRawMessage(message_id=943, chat_id=env.tg_chat_id, text="нужен дизайнер"),
+            FakeRawMessage(message_id=942, chat_id=env.tg_chat_id, text="привет"),
+            RuntimeError("Could not find a matching Constructor ID for the TLObject"),
+            FakeRawMessage(message_id=940, chat_id=env.tg_chat_id, text="спасибо"),
+        ]
+
+        recovered = await reconciler.run(env.account_id)
+
+        # 943/942 — в первой (успешной) пачке; 940 — за сбойной, недостижим.
+        assert recovered == 2
+        async with env.database.session() as db:
+            rows = (
+                await db.scalars(
+                    select(Message).where(Message.account_id == env.account_id)
+                )
+            ).all()
+        assert {row.tg_message_id for row in rows} == {942, 943}

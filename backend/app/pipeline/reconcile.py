@@ -81,12 +81,14 @@ class ChatReconciler:
         *,
         lookback_messages: int = 30,
         active_within_minutes: int = 30,
+        fetch_batch_size: int = 5,
     ) -> None:
         self._database = database
         self._clients = clients
         self._pipeline = pipeline
         self._lookback_messages = lookback_messages
         self._active_within = active_within_minutes
+        self._fetch_batch_size = fetch_batch_size
 
     async def run(self, account_id: uuid.UUID) -> int:
         if self._clients.get(account_id) is None:
@@ -122,13 +124,10 @@ class ChatReconciler:
             return 0
         peer = self._pipeline.peers.get(account_id, chat.tg_chat_id) or chat.tg_chat_id
 
+        messages = await self._fetch_recent(client, peer, chat.tg_chat_id)
         # От старого к новому: в обратном порядке cooldown занял бы самое
         # свежее сообщение первым, и по-настоящему первому пропущенному ответ
         # уже не ушёл бы.
-        messages = [
-            message
-            async for message in client.iter_messages(peer, limit=self._lookback_messages)
-        ]
         messages.reverse()
 
         recovered = 0
@@ -141,3 +140,43 @@ class ChatReconciler:
             if not already_known:
                 recovered += 1
         return recovered
+
+    async def _fetch_recent(
+        self, client: TelegramClientLike, peer: Any, tg_chat_id: int
+    ) -> list[Any]:
+        """Тянет последние lookback_messages маленькими пачками, а не одним
+        запросом.
+
+        Telethon разбирает ответ GetHistory как один атомарный объект: один
+        неизвестный TL-конструктор где угодно внутри страницы (новый тип
+        реакции/истории — не редкость, Telethon не поспевает за схемой
+        Telegram) валит разбор всего ответа целиком (TypeNotFoundError из
+        binaryreader), а не только одного сообщения. При запросе всего окна
+        разом это стабильно топило восстановление сразу для всего чата, включая
+        сообщения, ни в чём не повинные — маленькие пачки сужают потери до
+        одной такой пачки, а не до всего окна выгрузки.
+        """
+        collected: list[Any] = []
+        offset_id = 0
+        while len(collected) < self._lookback_messages:
+            batch: list[Any] = []
+            try:
+                async for message in client.iter_messages(
+                    peer,
+                    limit=min(self._fetch_batch_size, self._lookback_messages - len(collected)),
+                    offset_id=offset_id,
+                ):
+                    batch.append(message)
+            except Exception as exc:  # noqa: BLE001 — битая пачка не должна прятать уже собранные более свежие сообщения
+                logger.warning(
+                    "reconcile_batch_failed",
+                    tg_chat_id=tg_chat_id,
+                    offset_id=offset_id,
+                    detail=str(exc)[:200],
+                )
+                break
+            if not batch:
+                break
+            collected.extend(batch)
+            offset_id = batch[-1].id
+        return collected

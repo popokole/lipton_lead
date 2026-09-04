@@ -156,13 +156,24 @@ class FakeTelegramClient:
     async def get_dialogs(self, limit: int | None = None) -> list[FakeDialog]:
         return self.dialogs[:limit] if limit else self.dialogs
 
-    def iter_messages(self, entity: Any, *, limit: int | None = None) -> AsyncIterator[Any]:
-        items = self.history[:limit] if limit else list(self.history)
+    def iter_messages(
+        self, entity: Any, *, limit: int | None = None, offset_id: int = 0
+    ) -> AsyncIterator[Any]:
+        # history — от нового к старому, как настоящий Telethon; offset_id
+        # (как в реальном API) исключает всё не старше самого offset_id.
+        items = [m for m in self.history if not offset_id or m.id < offset_id]
+        items = items[:limit] if limit else items
         return self._iter(items)
 
     @staticmethod
     async def _iter(items: list[Any]) -> AsyncIterator[Any]:
         for item in items:
+            # Тест кладёт в history голое исключение вместо FakeRawMessage,
+            # чтобы сымитировать битый TL-конструктор где-то в ответе Telethon
+            # (см. reconcile_batch_failed в app/pipeline/reconcile.py) — вся
+            # "страница" в реальном API валится атомарно на нём.
+            if isinstance(item, BaseException):
+                raise item
             yield item
 
     async def send_read_acknowledge(self, entity: Any, *, max_id: int | None = None) -> None:
