@@ -398,7 +398,12 @@ class Worker:
                             await self._handle_review_callback(token, group_id, callback)
                         continue
                     message = upd.get("message") or {}
-                    if str(message.get("text") or "").strip() == "/start":
+                    text = str(message.get("text") or "").strip()
+                    # В группе клиент дописывает имя бота: "/start@liptonlead_bot" —
+                    # берём первое слово и отрезаем "@usernam", иначе команда в
+                    # группе молча игнорируется без единой строки в логах.
+                    command = text.split()[0].split("@")[0] if text else ""
+                    if command == "/start":
                         chat_id = (message.get("chat") or {}).get("id")
                         if chat_id is not None:
                             await self._notifier.send_start_menu(token, int(chat_id))
