@@ -30,7 +30,13 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 # Коды, при которых повтор осмыслен: агрегатор просит подождать.
-RETRYABLE_CODES = frozenset({"service_busy", "rate_limit_error", "server_error"})
+# upstream_unavailable — агрегатор сам пишет в message "Повторите запрос":
+# без этого кода такой ответ (2026-09-06, серия сбоев в течение 15 минут)
+# падал необрабатываемым AIError с первой же попытки, хотя ровно для этого
+# случая и существует retry/переключение модели.
+RETRYABLE_CODES = frozenset(
+    {"service_busy", "rate_limit_error", "server_error", "upstream_unavailable"}
+)
 
 
 @dataclass(frozen=True, slots=True)
