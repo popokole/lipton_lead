@@ -91,6 +91,34 @@ class TestGatewayRetry:
         assert calls["n"] == 2
         await rt.close()
 
+    async def test_upstream_busy_error_code_is_retried_and_succeeds(self) -> None:
+        """Тот же инцидент 2026-09-06: агрегатор через несколько минут после
+        upstream_unavailable начал слать соседний код upstream_busy с тем же
+        смыслом ("Повторите запрос чуть позже")."""
+        calls = {"n": 0}
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                body = (
+                    b'data: {"type": "error", "error": {"code": "upstream_busy", '
+                    b'"message": "try again later"}}\n\n'
+                )
+                return httpx.Response(
+                    200, content=body, headers={"content-type": "text/event-stream"}
+                )
+            return httpx.Response(
+                200, content=_SSE_OK, headers={"content-type": "text/event-stream"}
+            )
+
+        rt = _transport(httpx.MockTransport(handle))
+        result = await rt.complete(
+            messages=[{"role": "user", "content": "hi"}], model="m", max_output_tokens=100
+        )
+        assert result.text == "привет"
+        assert calls["n"] == 2
+        await rt.close()
+
     async def test_persistent_502_exhausts_retries(self) -> None:
         calls = {"n": 0}
 
