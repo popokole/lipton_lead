@@ -30,6 +30,10 @@ logger = get_logger(__name__)
 
 API_BASE = "https://api.telegram.org"
 
+_CHECK_AI_KEYBOARD = {
+    "inline_keyboard": [[{"text": "🔍 Проверить ИИ (codex.sale)", "callback_data": "check_ai"}]]
+}
+
 
 class NotifierBot:
     """Отправка карточек лидов через Bot API форум-группы."""
@@ -274,13 +278,13 @@ class NotifierBot:
         return await self._load_settings(db, require_enabled=True)
 
     async def poll_updates(self, token: str, offset: int) -> list[dict[str, Any]]:
-        """Забирает обновления бота (только нажатия кнопок) через long-poll."""
+        """Забирает обновления бота (нажатия кнопок и /start) через long-poll."""
         resp = await self._client.post(
             f"{API_BASE}/bot{token}/getUpdates",
             json={
                 "offset": offset,
                 "timeout": 25,
-                "allowed_updates": ["callback_query"],
+                "allowed_updates": ["callback_query", "message"],
             },
             timeout=httpx.Timeout(35.0),
         )
@@ -294,6 +298,29 @@ class NotifierBot:
         with contextlib.suppress(Exception):
             await self._call(
                 token, "answerCallbackQuery", callback_query_id=callback_id, text=text
+            )
+
+    async def send_start_menu(self, token: str, chat_id: int) -> None:
+        """Ответ на /start в личке с ботом-уведомителем: кнопка диагностики ИИ."""
+        with contextlib.suppress(Exception):
+            await self._call(
+                token,
+                "sendMessage",
+                chat_id=chat_id,
+                text="Бот-уведомитель Lipton Lead Gen.",
+                reply_markup=_CHECK_AI_KEYBOARD,
+            )
+
+    async def edit_message(self, token: str, chat_id: int, message_id: int, text: str) -> None:
+        """Обновляет текст сообщения на месте (используется карточкой проверки ИИ)."""
+        with contextlib.suppress(Exception):
+            await self._call(
+                token,
+                "editMessageText",
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=_CHECK_AI_KEYBOARD,
             )
 
     async def finalize_review_card(

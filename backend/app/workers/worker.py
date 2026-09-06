@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import os
 import socket
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -38,6 +39,7 @@ from app.actions.validator import ReplyValidator
 from app.ai.analyzer import AIAnalyzer
 from app.ai.budget import AIBudget, UsageRecorder
 from app.ai.generator import AIGenerator
+from app.ai.provider import GenerateRequest
 from app.ai.registry import build_provider, provider_is_configured
 from app.bus.commands import CommandConsumer
 from app.bus.events import EventPublisher
@@ -371,7 +373,7 @@ class Worker:
         return handle
 
     async def _review_poll_loop(self) -> None:
-        """Опрашивает бота-уведомитель на нажатия кнопок под карточками ревью.
+        """Опрашивает бота-уведомитель: нажатия кнопок (ревью, проверка ИИ) и /start.
 
         Один опросчик на воркер: getUpdates нельзя вызывать конкурентно. Пока
         бот не настроен — просто ждём. Решения идемпотентны по review.status.
@@ -390,7 +392,16 @@ class Worker:
                     offset = max(offset, int(upd.get("update_id", 0)) + 1)
                     callback = upd.get("callback_query")
                     if callback:
-                        await self._handle_review_callback(token, group_id, callback)
+                        if str(callback.get("data") or "") == "check_ai":
+                            await self._handle_check_ai_callback(token, callback)
+                        else:
+                            await self._handle_review_callback(token, group_id, callback)
+                        continue
+                    message = upd.get("message") or {}
+                    if str(message.get("text") or "").strip() == "/start":
+                        chat_id = (message.get("chat") or {}).get("id")
+                        if chat_id is not None:
+                            await self._notifier.send_start_menu(token, int(chat_id))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — опрос не критичнее работы
@@ -440,6 +451,50 @@ class Worker:
                     )
             else:
                 await self._notifier.answer_callback(token, cb_id, detail[:180] or "не удалось")
+
+    async def _handle_check_ai_callback(self, token: str, callback: dict[str, Any]) -> None:
+        """Кнопка «Проверить ИИ»: настоящий запрос через боевой провайдер (та же
+        цепочка модель+резервы+ретраи, что и у обычных ответов) — а не отдельная
+        самодельная проверка, которая может «врать» об истинной доступности.
+        """
+        cb_id = str(callback.get("id") or "")
+        message = callback.get("message") or {}
+        chat_id = (message.get("chat") or {}).get("id")
+        message_id = message.get("message_id")
+        await self._notifier.answer_callback(token, cb_id, "Проверяю...")
+        if chat_id is None or message_id is None:
+            return
+
+        if self._ai_provider is None:
+            await self._notifier.edit_message(
+                token, int(chat_id), int(message_id), "⚠️ ИИ не настроен (нет ключа провайдера)."
+            )
+            return
+
+        started = time.monotonic()
+        try:
+            response = await self._ai_provider.generate(
+                GenerateRequest(
+                    system_prompt="Ты тестовый ассистент для проверки связи.",
+                    message_text="Ответь одним словом: привет",
+                )
+            )
+            elapsed = time.monotonic() - started
+            model = response.usage.model or self.runtime.settings.default_ai_model
+            text = (
+                f"✅ ИИ доступен\n\n"
+                f"Модель: {model}\n"
+                f"Время: {elapsed:.1f} с\n\n"
+                f"Ответ: {response.result.text}"
+            )
+        except Exception as exc:  # noqa: BLE001 — сам сбой и есть результат диагностики
+            elapsed = time.monotonic() - started
+            text = (
+                f"❌ ИИ недоступен\n\n"
+                f"Время: {elapsed:.1f} с\n"
+                f"Ошибка: {type(exc).__name__}: {str(exc)[:300]}"
+            )
+        await self._notifier.edit_message(token, int(chat_id), int(message_id), text)
 
     async def _execute_review(self, db: Any, review: Any) -> tuple[bool, str]:
         """Отправляет подтверждённый ответ и записывает его (как обычный ответ)."""
