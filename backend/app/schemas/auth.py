@@ -5,14 +5,19 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 from app.models import UserRole
 from app.schemas.common import ORMModel
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    # Не EmailStr: bootstrap.py заводит admin_email из настроек без всякой
+    # проверки формата (см. ADMIN_EMAIL=admin@lipton.local в .env) — панель
+    # внутренняя, реальная доставляемость почты тут не при делах. EmailStr
+    # (email-validator) отдельно отклоняет .local/.test/.invalid как
+    # «special-use domain», из-за чего штатный admin-аккаунт не мог залогиниться.
+    email: str = Field(min_length=3, max_length=255)
     password: str = Field(min_length=1, max_length=256)
 
 
@@ -44,7 +49,7 @@ class ChangePasswordRequest(BaseModel):
 
 
 class CreateUserRequest(BaseModel):
-    email: EmailStr
+    email: str = Field(min_length=3, max_length=255)
     password: str = Field(min_length=1, max_length=256)
     full_name: str | None = Field(default=None, max_length=200)
     role: UserRole = UserRole.VIEWER
