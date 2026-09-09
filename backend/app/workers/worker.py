@@ -393,8 +393,11 @@ class Worker:
                     offset = max(offset, int(upd.get("update_id", 0)) + 1)
                     callback = upd.get("callback_query")
                     if callback:
-                        if str(callback.get("data") or "") == "check_ai":
+                        data = str(callback.get("data") or "")
+                        if data == "check_ai":
                             await self._handle_check_ai_callback(token, callback)
+                        elif data == "stories_stats":
+                            await self._handle_stories_callback(token, callback)
                         else:
                             await self._handle_review_callback(token, group_id, callback)
                         continue
@@ -740,9 +743,13 @@ class Worker:
             await self._sleep(interval)
 
     async def _run_story_tick(self) -> float:
+        import random
+        from datetime import timedelta
+
+        from app.core.clock import utcnow
         from app.models.story_settings import SINGLETON_ID as STORY_ID
         from app.models.story_settings import StorySettings
-        from app.telegram.stories import view_user_stories
+        from app.telegram.stories import engage_user_stories
 
         async with self.runtime.database.session() as db:
             row = await db.get(StorySettings, STORY_ID)
@@ -751,33 +758,96 @@ class Worker:
         if not self._within_work_hours():
             return 300.0
 
-        per_hour = max(1, row.per_hour)
-        interval = max(20.0, 3600.0 / per_hour)
         redis = self.runtime.redis.client
+        offset = self.runtime.settings.work_hours_tz_offset
+        now_local = utcnow() + timedelta(hours=offset)
+        hour_key = f"story:acted:{now_local.strftime('%Y-%m-%d-%H')}"
+        acted = int(await redis.get(hour_key) or 0)
+        if acted >= max(1, row.per_hour):
+            return 120.0  # лимит на этот час выбран
 
+        attempts = 0
         for account_id in list(self._clients.account_ids):
             client = self._clients.get(account_id)
             if client is None:
                 continue
-            candidates = await self._story_candidates(account_id, row.active_window_hours)
-            for tg_user_id in candidates:
+            for tg_user_id in await self._story_candidates(account_id, row.active_window_hours):
                 key = f"storyview:{account_id}:{tg_user_id}"
-                # Один захват на per_user_cooldown_hours: не смотрим одного дважды.
-                claimed = await redis.set(
+                # Один захват на per_user_cooldown_hours: не трогаем одного дважды.
+                if not await redis.set(
                     key, "1", nx=True, ex=max(1, row.per_user_cooldown_hours) * 3600
-                )
-                if not claimed:
+                ):
                     continue
-                viewed = await view_user_stories(client, tg_user_id)
+                attempts += 1
+                viewed, liked, name = await engage_user_stories(client, tg_user_id)
+                if viewed == 0:
+                    # нет активных историй — лимит не тратим, но и не долбим API
+                    if attempts >= 6:
+                        return 90.0
+                    continue
+                await redis.incr(hour_key)
+                await redis.expire(hour_key, 3700)
+                await self._record_story_stat(name, liked)
                 logger.info(
                     "story_viewed",
                     account_id=str(account_id),
                     tg_user_id=tg_user_id,
                     stories=viewed,
+                    liked=liked,
                 )
-                return interval  # один человек за тик — держим темп
-        # Некого смотреть прямо сейчас — заглянем позже.
-        return max(interval, 120.0)
+                # Человекоподобно: чаще коротко (1м), иногда средне (10м) и редко долго (20м).
+                return float(random.choices([60, 600, 1200], weights=[5, 5, 2])[0])
+        return 120.0
+
+    async def _record_story_stat(self, name: str, liked: bool) -> None:
+        import json
+        from datetime import timedelta
+
+        from app.core.clock import utcnow
+
+        redis = self.runtime.redis.client
+        offset = self.runtime.settings.work_hours_tz_offset
+        day = (utcnow() + timedelta(hours=offset)).strftime("%Y-%m-%d")
+        await redis.incr(f"story:viewed:{day}")
+        await redis.expire(f"story:viewed:{day}", 8 * 86400)
+        await redis.incr("story:viewed:total")
+        if liked:
+            await redis.incr(f"story:liked:{day}")
+            await redis.expire(f"story:liked:{day}", 8 * 86400)
+            await redis.incr("story:liked:total")
+        entry = json.dumps(
+            {"name": name[:40], "liked": liked, "at": utcnow().isoformat()}, ensure_ascii=False
+        )
+        await redis.lpush("story:recent", entry)
+        await redis.ltrim("story:recent", 0, 29)
+
+    async def _handle_stories_callback(self, token: str, callback: dict[str, Any]) -> None:
+        from app.telegram.stories import read_story_stats
+
+        cb_id = str(callback.get("id") or "")
+        chat_id = ((callback.get("message") or {}).get("chat") or {}).get("id")
+        await self._notifier.answer_callback(token, cb_id, "Собираю статистику…")
+        stats = await read_story_stats(
+            self.runtime.redis.client, self.runtime.settings.work_hours_tz_offset
+        )
+        lines = [
+            "📊 <b>Истории — авто-просмотр</b>",
+            f"👁 просмотрено сегодня: {stats['viewed_today']} · всего: {stats['viewed_total']}",
+            f"❤️ лайков сегодня: {stats['liked_today']} · всего: {stats['liked_total']}",
+        ]
+        if stats["recent"]:
+            lines.append("\n<b>Последние:</b>")
+            for item in stats["recent"][:10]:
+                mark = "❤️" if item.get("liked") else "👁"
+                name = (
+                    str(item.get("name") or "?")
+                    .replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                )
+                lines.append(f"{mark} {name}")
+        if chat_id is not None:
+            await self._notifier.send_stories_stats(token, int(chat_id), "\n".join(lines))
 
     async def _story_candidates(self, account_id: uuid.UUID, window_hours: int) -> list[int]:
         """Лиды + недавно активные в отслеживаемых чатах (без своих id)."""

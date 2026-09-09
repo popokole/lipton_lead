@@ -34,6 +34,17 @@ _CHECK_AI_KEYBOARD = {
     "inline_keyboard": [[{"text": "🔍 Проверить ИИ (codex.sale)", "callback_data": "check_ai"}]]
 }
 
+_START_MENU_KEYBOARD = {
+    "inline_keyboard": [
+        [{"text": "🔍 Проверить ИИ (codex.sale)", "callback_data": "check_ai"}],
+        [{"text": "📊 Истории (авто-просмотр)", "callback_data": "stories_stats"}],
+    ]
+}
+
+_STORIES_KEYBOARD = {
+    "inline_keyboard": [[{"text": "🔄 Обновить", "callback_data": "stories_stats"}]]
+}
+
 
 class NotifierBot:
     """Отправка карточек лидов через Bot API форум-группы."""
@@ -301,14 +312,27 @@ class NotifierBot:
             )
 
     async def send_start_menu(self, token: str, chat_id: int) -> None:
-        """Ответ на /start в личке с ботом-уведомителем: кнопка диагностики ИИ."""
+        """Ответ на /start: диагностика ИИ + статистика авто-просмотра историй."""
         with contextlib.suppress(Exception):
             await self._call(
                 token,
                 "sendMessage",
                 chat_id=chat_id,
                 text="Бот-уведомитель Lipton Lead Gen.",
-                reply_markup=_CHECK_AI_KEYBOARD,
+                reply_markup=_START_MENU_KEYBOARD,
+            )
+
+    async def send_stories_stats(self, token: str, chat_id: int, text: str) -> None:
+        """Отправляет статистику авто-просмотра историй с кнопкой «Обновить»."""
+        with contextlib.suppress(Exception):
+            await self._call(
+                token,
+                "sendMessage",
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=_STORIES_KEYBOARD,
             )
 
     async def edit_message(self, token: str, chat_id: int, message_id: int, text: str) -> None:

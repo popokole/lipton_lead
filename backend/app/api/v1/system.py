@@ -7,6 +7,7 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import APIRouter, Query
+from pydantic import BaseModel
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import InstrumentedAttribute
 
@@ -35,6 +36,24 @@ from app.schemas.resources import (
 
 workers_router = APIRouter(prefix="/workers", tags=["workers"])
 analytics_router = APIRouter(prefix="/analytics", tags=["analytics"])
+
+
+class StoryStatOut(BaseModel):
+    viewed_today: int
+    liked_today: int
+    viewed_total: int
+    liked_total: int
+    recent: list[dict[str, Any]]
+
+
+@analytics_router.get(
+    "/stories", response_model=StoryStatOut, summary="Статистика авто-просмотра историй"
+)
+async def story_stats(_user: CurrentUser, runtime: RuntimeDep) -> StoryStatOut:
+    from app.telegram.stories import read_story_stats
+
+    data = await read_story_stats(runtime.redis.client, runtime.settings.work_hours_tz_offset)
+    return StoryStatOut(**data)
 
 
 @workers_router.get("", response_model=list[WorkerOut], summary="Живые воркеры")

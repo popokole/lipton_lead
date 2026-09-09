@@ -32,6 +32,14 @@ import type { DashboardCounters, DashboardSeries, Escalation, Lead, RealtimeEven
 
 type PendingReview = { id: string };
 
+interface StoryStat {
+  viewed_today: number;
+  liked_today: number;
+  viewed_total: number;
+  liked_total: number;
+  recent: { name: string; liked: boolean; at: string }[];
+}
+
 const EVENT_META: Record<string, { icon: ComponentType<{ size?: number }>; label: string }> = {
   'account.status': { icon: UserCircle, label: 'Статус аккаунта изменился' },
   'worker.status': { icon: Bot, label: 'Статус воркера изменился' },
@@ -75,6 +83,7 @@ export default function OverviewPage() {
   const handoff = useApi<Escalation[]>('/handoff', 20_000);
   const reviews = useApi<PendingReview[]>('/reviews', 20_000);
   const leads = useApi<Lead[]>('/leads?limit=200', 30_000);
+  const stories = useApi<StoryStat>('/analytics/stories', 30_000);
   const realtime = useRealtime(25);
 
   const hotLeads = leads.data?.filter((l) => l.status === 'HOT').length ?? 0;
@@ -216,6 +225,28 @@ export default function OverviewPage() {
               </tr>
             ))}
           </Table>
+        )}
+      </Card>
+
+      <Card title="Истории — авто-просмотр (прогрев)" className="mt-6">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <Stat label="Просмотрено сегодня" value={stories.data?.viewed_today ?? 0} />
+          <Stat label="Лайков сегодня" value={stories.data?.liked_today ?? 0} />
+          <Stat label="Просмотрено всего" value={stories.data?.viewed_total ?? 0} />
+          <Stat label="Лайков всего" value={stories.data?.liked_total ?? 0} />
+        </div>
+        {(stories.data?.recent?.length ?? 0) > 0 && (
+          <ul className="mt-4 flex flex-wrap gap-2">
+            {stories.data?.recent.slice(0, 12).map((item, index) => (
+              <li
+                key={`${item.at}-${index}`}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-ink-700 bg-ink-900 px-2.5 py-1 text-xs text-slate-300"
+              >
+                <span>{item.liked ? '❤️' : '👁'}</span>
+                <span className="max-w-[140px] truncate">{item.name || '?'}</span>
+              </li>
+            ))}
+          </ul>
         )}
       </Card>
 
