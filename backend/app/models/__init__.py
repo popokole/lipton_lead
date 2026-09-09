@@ -44,6 +44,7 @@ from app.models.review import PendingReview
 from app.models.rule import Rule, RuleAccount, RuleChat
 from app.models.scenario import Scenario
 from app.models.stoplist import StopEntry
+from app.models.story_settings import StorySettings
 from app.models.user import User
 
 __all__ = [
@@ -87,6 +88,7 @@ __all__ = [
     "Scenario",
     "SessionKind",
     "StopEntry",
+    "StorySettings",
     "TelegramSession",
     "User",
     "UserMemory",

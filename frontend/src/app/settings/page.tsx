@@ -178,7 +178,125 @@ export default function SettingsPage() {
       </Card>
 
       <PersonaCard />
+      <div className="mt-6">
+        <StoriesCard />
+      </div>
     </Shell>
+  );
+}
+
+interface StoryState {
+  enabled: boolean;
+  per_hour: number;
+  active_window_hours: number;
+  per_user_cooldown_hours: number;
+}
+
+/** Авто-просмотр историй (прогрев): смотрим истории лидов и активных в чатах. */
+function StoriesCard() {
+  const [st, setSt] = useState<StoryState | null>(null);
+  const [perHour, setPerHour] = useState('20');
+  const [windowH, setWindowH] = useState('48');
+  const [cooldownH, setCooldownH] = useState('20');
+  const [error, setError] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const s = await api.get<StoryState>('/stories');
+        setSt(s);
+        setPerHour(String(s.per_hour));
+        setWindowH(String(s.active_window_hours));
+        setCooldownH(String(s.per_user_cooldown_hours));
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : String(err));
+      }
+    })();
+  }, []);
+
+  async function save(patch: Record<string, unknown>) {
+    setBusy(true);
+    setError(null);
+    setMsg(null);
+    try {
+      const s = await api.put<StoryState>('/stories', patch);
+      setSt(s);
+      setMsg('Сохранено');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card title="Авто-просмотр историй (прогрев)">
+      <p className="mb-4 text-sm text-slate-400">
+        Аккаунт периодически «смотрит» истории <b>лидов</b> и тех, кто недавно писал в
+        отслеживаемых чатах — так он появляется у них в списке зрителей. Массовый просмотр — заметный
+        сигнал, поэтому держите темп низким.
+      </p>
+      {error && <ErrorText>{error}</ErrorText>}
+      {msg && (
+        <p className="mb-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
+          {msg}
+        </p>
+      )}
+
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Field label="Просмотров в час" hint="Темп. Безопасно 15–30">
+          <input
+            className={inputClass}
+            value={perHour}
+            onChange={(e) => setPerHour(e.target.value.replace(/\D/g, ''))}
+          />
+        </Field>
+        <Field label="Активные за, часов" hint="Кого считать «активным» в чатах">
+          <input
+            className={inputClass}
+            value={windowH}
+            onChange={(e) => setWindowH(e.target.value.replace(/\D/g, ''))}
+          />
+        </Field>
+        <Field label="Пауза на человека, часов" hint="Не смотреть одного чаще">
+          <input
+            className={inputClass}
+            value={cooldownH}
+            onChange={(e) => setCooldownH(e.target.value.replace(/\D/g, ''))}
+          />
+        </Field>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <Button
+          disabled={busy}
+          onClick={() =>
+            save({
+              per_hour: Number(perHour) || 20,
+              active_window_hours: Number(windowH) || 48,
+              per_user_cooldown_hours: Number(cooldownH) || 20,
+            })
+          }
+        >
+          {busy ? 'Сохраняем…' : 'Сохранить'}
+        </Button>
+        <label className="flex items-center gap-2 text-sm text-slate-300">
+          <input
+            type="checkbox"
+            checked={st?.enabled ?? false}
+            disabled={busy}
+            onChange={(e) => save({ enabled: e.target.checked })}
+            className="h-4 w-4 rounded border-ink-600 bg-ink-950"
+          />
+          Включить авто-просмотр
+        </label>
+        <span className="text-xs text-slate-500">
+          {st?.enabled ? 'работает в рабочие часы' : 'выключено'}
+        </span>
+      </div>
+    </Card>
   );
 }
 

@@ -134,6 +134,7 @@ class Worker:
             asyncio.create_task(self._approved_review_loop(), name="worker-review-exec"),
             asyncio.create_task(self._digest_loop(), name="worker-digest"),
             asyncio.create_task(self._reconcile_loop(), name="worker-reconcile"),
+            asyncio.create_task(self._story_loop(), name="worker-stories"),
         ]
         self.set_status(STATUS_HEALTHY)
         await self._sync_status_to_db()
@@ -720,6 +721,117 @@ class Worker:
         if pending:
             lines.append(f"🟡 Ждут подтверждения: {int(pending)}")
         return "\n".join(lines)
+
+    # --- авто-просмотр историй (прогрев) --------------------------------------
+    async def _story_loop(self) -> None:
+        """Периодически «просматривает» истории лидов и активных в чатах.
+
+        Темп и включение — из story_settings (панель). По одному просмотру за
+        тик: так держим заданный лимит в час и не палимся всплесками.
+        """
+        while not self._stop.is_set():
+            interval = 120.0
+            try:
+                interval = await self._run_story_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — прогрев не критичнее работы
+                logger.warning("story_loop_failed", detail=str(exc)[:150])
+            await self._sleep(interval)
+
+    async def _run_story_tick(self) -> float:
+        from app.models.story_settings import SINGLETON_ID as STORY_ID
+        from app.models.story_settings import StorySettings
+        from app.telegram.stories import view_user_stories
+
+        async with self.runtime.database.session() as db:
+            row = await db.get(StorySettings, STORY_ID)
+        if row is None or not row.enabled:
+            return 60.0
+        if not self._within_work_hours():
+            return 300.0
+
+        per_hour = max(1, row.per_hour)
+        interval = max(20.0, 3600.0 / per_hour)
+        redis = self.runtime.redis.client
+
+        for account_id in list(self._clients.account_ids):
+            client = self._clients.get(account_id)
+            if client is None:
+                continue
+            candidates = await self._story_candidates(account_id, row.active_window_hours)
+            for tg_user_id in candidates:
+                key = f"storyview:{account_id}:{tg_user_id}"
+                # Один захват на per_user_cooldown_hours: не смотрим одного дважды.
+                claimed = await redis.set(
+                    key, "1", nx=True, ex=max(1, row.per_user_cooldown_hours) * 3600
+                )
+                if not claimed:
+                    continue
+                viewed = await view_user_stories(client, tg_user_id)
+                logger.info(
+                    "story_viewed",
+                    account_id=str(account_id),
+                    tg_user_id=tg_user_id,
+                    stories=viewed,
+                )
+                return interval  # один человек за тик — держим темп
+        # Некого смотреть прямо сейчас — заглянем позже.
+        return max(interval, 120.0)
+
+    async def _story_candidates(self, account_id: uuid.UUID, window_hours: int) -> list[int]:
+        """Лиды + недавно активные в отслеживаемых чатах (без своих id)."""
+        from datetime import timedelta
+
+        from sqlalchemy import select
+
+        from app.core.clock import utcnow
+        from app.models import Chat, Lead, Message
+
+        since = utcnow() - timedelta(hours=max(1, window_hours))
+        async with self.runtime.database.session() as db:
+            leads = (
+                await db.scalars(select(Lead.tg_user_id).where(Lead.account_id == account_id))
+            ).all()
+            active = (
+                await db.scalars(
+                    select(Message.sender_tg_id)
+                    .join(Chat, Chat.id == Message.chat_id)
+                    .where(
+                        Message.account_id == account_id,
+                        Message.is_incoming.is_(True),
+                        Chat.monitored.is_(True),
+                        Message.created_at >= since,
+                        Message.sender_tg_id.is_not(None),
+                    )
+                    .distinct()
+                    .limit(300)
+                )
+            ).all()
+
+        own = self._self_guard.own_ids
+        seen: set[int] = set()
+        out: list[int] = []
+        for uid in [*leads, *active]:
+            if uid and int(uid) not in own and int(uid) not in seen:
+                seen.add(int(uid))
+                out.append(int(uid))
+        return out
+
+    def _within_work_hours(self) -> bool:
+        """True, если сейчас рабочие часы (start == end — режим выключен)."""
+        from datetime import timedelta
+
+        from app.core.clock import utcnow
+
+        start = self.runtime.settings.work_hours_start
+        end = self.runtime.settings.work_hours_end
+        if start == end:
+            return True
+        hour = (utcnow() + timedelta(hours=self.runtime.settings.work_hours_tz_offset)).hour
+        if start < end:
+            return start <= hour < end
+        return hour >= start or hour < end
 
     async def _refresh_own_ids(self) -> None:
         """Обновляет реестр своих id (анти-самоответ) и стоп-лист."""
