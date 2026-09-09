@@ -88,6 +88,14 @@ export default function TreePage() {
         <Stat label="Лидов" value={totals.leads} />
       </div>
 
+      {tree.data?.map((account) => (
+        <SunburstCard
+          key={`sb-${account.account_id}`}
+          account={account}
+          onSelect={(chat) => setSelected({ account: account.label, chat })}
+        />
+      ))}
+
       <Card className="mb-4">
         <div className="flex flex-wrap items-center gap-3">
           <div className="relative min-w-[200px] flex-1">
@@ -337,6 +345,205 @@ function AccountChats({
         </ul>
       )}
     </Card>
+  );
+}
+
+const KIND_COLOR: Record<Exclude<TypeFilter, 'all'>, string> = {
+  group: '#6366f1',
+  dm: '#38bdf8',
+  channel: '#64748b',
+};
+const KIND_TITLE: Record<Exclude<TypeFilter, 'all'>, string> = {
+  group: 'Группы',
+  dm: 'Личка',
+  channel: 'Каналы',
+};
+
+function polar(cx: number, cy: number, r: number, a: number): [number, number] {
+  return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+}
+
+function annular(
+  cx: number,
+  cy: number,
+  rI: number,
+  rO: number,
+  a0: number,
+  a1: number,
+): string {
+  const large = a1 - a0 > Math.PI ? 1 : 0;
+  const [x0, y0] = polar(cx, cy, rO, a0);
+  const [x1, y1] = polar(cx, cy, rO, a1);
+  const [x2, y2] = polar(cx, cy, rI, a1);
+  const [x3, y3] = polar(cx, cy, rI, a0);
+  return `M${x0} ${y0} A${rO} ${rO} 0 ${large} 1 ${x1} ${y1} L${x2} ${y2} A${rI} ${rI} 0 ${large} 0 ${x3} ${y3} Z`;
+}
+
+/** Радиальная инфографика «дерево»: центр — аккаунт, кольцо — категории,
+ *  внешние дольки — чаты (зелёные = есть лиды, сгруппированы по категории). */
+function SunburstCard({
+  account,
+  onSelect,
+}: {
+  account: ChatTreeAccount;
+  onSelect: (c: ChatNode) => void;
+}) {
+  const groups = useMemo(() => {
+    const by: Record<Exclude<TypeFilter, 'all'>, ChatNode[]> = { group: [], dm: [], channel: [] };
+    for (const c of account.chats) by[kindOf(c.type)].push(c);
+    const order: Exclude<TypeFilter, 'all'>[] = ['group', 'dm', 'channel'];
+    return order
+      .map((kind) => ({
+        kind,
+        chats: [...by[kind]].sort(
+          (a, b) => b.leads_count - a.leads_count || b.messages_total - a.messages_total,
+        ),
+      }))
+      .filter((g) => g.chats.length > 0);
+  }, [account.chats]);
+
+  const size = 560;
+  const cx = size / 2;
+  const cy = size / 2;
+  const ri0 = 62;
+  const ri1 = 132;
+  const ro0 = 138;
+  const ro1 = 250;
+  const gap = 0.02;
+
+  const weight = (c: ChatNode) => Math.max(c.messages_total, 1);
+  const grand = groups.reduce((s, g) => s + g.chats.reduce((ss, c) => ss + weight(c), 0), 0) || 1;
+
+  const catSegs: { kind: Exclude<TypeFilter, 'all'>; a0: number; a1: number }[] = [];
+  const chatSegs: { chat: ChatNode; kind: Exclude<TypeFilter, 'all'>; a0: number; a1: number }[] =
+    [];
+  const catLabels: {
+    kind: Exclude<TypeFilter, 'all'>;
+    mid: number;
+    count: number;
+    leads: number;
+  }[] = [];
+
+  let a = -Math.PI / 2;
+  for (const g of groups) {
+    const gw = g.chats.reduce((s, c) => s + weight(c), 0);
+    const span = (gw / grand) * (Math.PI * 2 - gap * groups.length);
+    const a0 = a;
+    const a1 = a + span;
+    catSegs.push({ kind: g.kind, a0, a1 });
+    catLabels.push({
+      kind: g.kind,
+      mid: (a0 + a1) / 2,
+      count: g.chats.length,
+      leads: g.chats.reduce((s, c) => s + c.leads_count, 0),
+    });
+    let ca = a0;
+    for (const c of g.chats) {
+      const cspan = (weight(c) / gw) * span;
+      chatSegs.push({ chat: c, kind: g.kind, a0: ca, a1: ca + cspan });
+      ca += cspan;
+    }
+    a = a1 + gap;
+  }
+
+  return (
+    <Card title={`${account.label} · инфографика`} className="mb-4">
+      <div className="overflow-auto">
+        <svg
+          viewBox={`0 0 ${size} ${size}`}
+          className="mx-auto block h-auto w-full"
+          style={{ maxWidth: 520 }}
+        >
+          {/* внешнее кольцо: чаты */}
+          {chatSegs.map(({ chat, kind, a0, a1 }) => {
+            const hasLead = chat.leads_count > 0;
+            const fill = hasLead ? '#34d399' : KIND_COLOR[kind];
+            const op = hasLead ? 0.9 : chat.monitored ? 0.4 : 0.16;
+            return (
+              <path
+                key={chat.id}
+                d={annular(cx, cy, ro0, ro1, a0, a1)}
+                fill={fill}
+                fillOpacity={op}
+                stroke="#0b1220"
+                strokeWidth={0.5}
+                className="cursor-pointer transition-opacity hover:fill-opacity-100"
+                onClick={() => onSelect(chat)}
+              >
+                <title>
+                  {chatName(chat)} · {chat.messages_total} сообщ.
+                  {hasLead ? ` · ${chat.leads_count} лид` : ''}
+                </title>
+              </path>
+            );
+          })}
+
+          {/* внутреннее кольцо: категории */}
+          {catSegs.map(({ kind, a0, a1 }) => (
+            <path
+              key={kind}
+              d={annular(cx, cy, ri0, ri1, a0, a1)}
+              fill={KIND_COLOR[kind]}
+              fillOpacity={0.85}
+              stroke="#0b1220"
+              strokeWidth={1}
+            />
+          ))}
+          {catLabels.map(({ kind, mid, count, leads }) => {
+            const [lx, ly] = polar(cx, cy, (ri0 + ri1) / 2, mid);
+            return (
+              <g key={`l-${kind}`} pointerEvents="none">
+                <text
+                  x={lx}
+                  y={ly - 4}
+                  textAnchor="middle"
+                  fontSize="13"
+                  fontWeight="600"
+                  className="fill-white"
+                >
+                  {KIND_TITLE[kind]}
+                </text>
+                <text x={lx} y={ly + 11} textAnchor="middle" fontSize="10" className="fill-white/80">
+                  {count} · {leads} лид
+                </text>
+              </g>
+            );
+          })}
+
+          {/* центр: аккаунт */}
+          <circle cx={cx} cy={cy} r={54} fill="#0b1220" stroke="#4f8cff" strokeWidth="3" />
+          <text
+            x={cx}
+            y={cy - 4}
+            textAnchor="middle"
+            fontSize="14"
+            fontWeight="600"
+            className="fill-slate-100"
+          >
+            {account.label.length > 12 ? account.label.slice(0, 11) + '…' : account.label}
+          </text>
+          <text x={cx} y={cy + 16} textAnchor="middle" fontSize="13" className="fill-emerald-300">
+            {account.leads_count} лидов
+          </text>
+        </svg>
+      </div>
+      <div className="mt-3 flex flex-wrap justify-center gap-x-4 gap-y-1 text-xs text-slate-400">
+        <LegendDot color="#34d399" label="есть лиды" />
+        <LegendDot color={KIND_COLOR.dm} label="личка" />
+        <LegendDot color={KIND_COLOR.group} label="группы" />
+        <LegendDot color={KIND_COLOR.channel} label="каналы" />
+        <span className="text-slate-600">размер дольки — активность · клик → детали</span>
+      </div>
+    </Card>
+  );
+}
+
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: color }} />
+      {label}
+    </span>
   );
 }
 
