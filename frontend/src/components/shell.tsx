@@ -45,7 +45,7 @@ const NAV: NavGroup[] = [
       { href: '/inbox', label: 'Общение', icon: MessageSquare },
       { href: '/chats', label: 'Чаты', icon: MessageSquare },
       { href: '/conversations', label: 'Диалоги', icon: MessageSquare },
-      { href: '/tree', label: 'Дерево чатов', icon: MessageSquare },
+      { href: '/tree', label: 'Активность чатов', icon: MessageSquare },
       { href: '/messages', label: 'Сообщения', icon: MessageSquare },
     ],
   },

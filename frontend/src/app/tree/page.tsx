@@ -1,18 +1,55 @@
 'use client';
 
+import { Filter, Search, Target } from 'lucide-react';
 import { useMemo, useState } from 'react';
 
 import { Shell } from '@/components/shell';
-import { Button, Card, ChatAvatar, Empty, ErrorText, PageHeader, Stat } from '@/components/ui';
+import {
+  Badge,
+  Button,
+  Card,
+  ChatAvatar,
+  Empty,
+  ErrorText,
+  PageHeader,
+  Stat,
+  inputClass,
+} from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 import { useApi } from '@/lib/hooks';
 import type { ChatNode, ChatTreeAccount } from '@/lib/types';
+
+type TypeFilter = 'all' | 'dm' | 'group' | 'channel';
+type SortKey = 'leads' | 'activity' | 'replies';
+
+function kindOf(type: string): Exclude<TypeFilter, 'all'> {
+  if (type === 'PRIVATE') return 'dm';
+  if (type === 'CHANNEL') return 'channel';
+  return 'group';
+}
+
+const KIND_LABEL: Record<Exclude<TypeFilter, 'all'>, string> = {
+  dm: 'личка',
+  group: 'группа',
+  channel: 'канал',
+};
+
+function chatName(chat: ChatNode): string {
+  return chat.title ?? (chat.username ? `@${chat.username}` : String(chat.tg_chat_id));
+}
 
 export default function TreePage() {
   const tree = useApi<ChatTreeAccount[]>('/chats/tree', 12_000);
   const [selected, setSelected] = useState<{ account: string; chat: ChatNode } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Фильтры/сортировка — то, чего не хватало радиальному графу: найти, где лиды.
+  const [query, setQuery] = useState('');
+  const [type, setType] = useState<TypeFilter>('all');
+  const [leadsOnly, setLeadsOnly] = useState(false);
+  const [monitoredOnly, setMonitoredOnly] = useState(false);
+  const [sort, setSort] = useState<SortKey>('leads');
 
   const totals = (tree.data ?? []).reduce(
     (acc, a) => ({
@@ -40,28 +77,83 @@ export default function TreePage() {
   return (
     <Shell>
       <PageHeader
-        title="Дерево чатов"
-        subtitle="Аккаунт в центре, чаты вокруг. Размер — активность, зелёный ободок — лиды, тусклый — слежка выключена"
+        title="Активность чатов"
+        subtitle="Все чаты аккаунта — по лидам и активности. Ищите, фильтруйте, включайте слежку"
       />
       <ErrorText>{error ?? tree.error}</ErrorText>
 
-      <div className="mb-6 grid gap-4 sm:grid-cols-3">
+      <div className="mb-6 grid grid-cols-3 gap-4">
         <Stat label="Чатов" value={totals.chats} />
         <Stat label="Сообщений" value={totals.messages} />
         <Stat label="Лидов" value={totals.leads} />
       </div>
 
+      <Card className="mb-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative min-w-[200px] flex-1">
+            <Search
+              size={15}
+              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-500"
+            />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Поиск по названию или @нику"
+              className={`${inputClass} pl-9`}
+            />
+          </div>
+          <Seg
+            value={type}
+            onChange={(v) => setType(v as TypeFilter)}
+            options={[
+              ['all', 'Все'],
+              ['dm', 'Личка'],
+              ['group', 'Группы'],
+              ['channel', 'Каналы'],
+            ]}
+          />
+          <button
+            onClick={() => setLeadsOnly((v) => !v)}
+            className={toggleClass(leadsOnly, 'ok')}
+            title="Показать только чаты, где есть лиды"
+          >
+            <Target size={13} /> с лидами
+          </button>
+          <button
+            onClick={() => setMonitoredOnly((v) => !v)}
+            className={toggleClass(monitoredOnly, 'info')}
+            title="Показать только чаты со включённой слежкой"
+          >
+            <Filter size={13} /> отслеживаемые
+          </button>
+          <div className="ml-auto flex items-center gap-2 text-xs text-slate-500">
+            <span>сортировка</span>
+            <Seg
+              value={sort}
+              onChange={(v) => setSort(v as SortKey)}
+              options={[
+                ['leads', 'Лиды'],
+                ['activity', 'Активность'],
+                ['replies', 'Ответы'],
+              ]}
+            />
+          </div>
+        </div>
+      </Card>
+
       {(tree.data?.length ?? 0) === 0 ? (
-        <Empty>Пока нет данных. Аккаунт наполнит дерево, как только начнёт читать чаты.</Empty>
+        <Empty>Пока нет данных. Аккаунт наполнит список, как только начнёт читать чаты.</Empty>
       ) : (
         <div className="space-y-6">
           {tree.data?.map((account) => (
-            <Card key={account.account_id}>
-              <RadialGraph
-                account={account}
-                onSelect={(chat) => setSelected({ account: account.label, chat })}
-              />
-            </Card>
+            <AccountChats
+              key={account.account_id}
+              account={account}
+              filters={{ query, type, leadsOnly, monitoredOnly, sort }}
+              onSelect={(chat) => setSelected({ account: account.label, chat })}
+              onToggleMonitor={toggleMonitor}
+              busy={busy}
+            />
           ))}
         </div>
       )}
@@ -84,13 +176,10 @@ export default function TreePage() {
               />
               <div className="min-w-0">
                 <h3 className="truncate text-sm font-medium text-slate-100">
-                  {selected.chat.title ??
-                    (selected.chat.username
-                      ? `@${selected.chat.username}`
-                      : selected.chat.tg_chat_id)}
+                  {chatName(selected.chat)}
                 </h3>
                 <p className="text-xs text-slate-500">
-                  {selected.chat.type.toLowerCase()} · {selected.account}
+                  {KIND_LABEL[kindOf(selected.chat.type)]} · {selected.account}
                 </p>
               </div>
             </div>
@@ -119,6 +208,11 @@ export default function TreePage() {
                 ? 'Правила работают: аккаунт может отвечать в этом чате.'
                 : 'Сообщения читаются, но правила не запускаются — ответов не будет.'}
             </p>
+            <div className="mt-4 flex justify-end">
+              <a href="/inbox">
+                <Button variant="ghost">Открыть в «Общении»</Button>
+              </a>
+            </div>
           </div>
         </div>
       )}
@@ -126,159 +220,158 @@ export default function TreePage() {
   );
 }
 
-function RadialGraph({
+interface Filters {
+  query: string;
+  type: TypeFilter;
+  leadsOnly: boolean;
+  monitoredOnly: boolean;
+  sort: SortKey;
+}
+
+function AccountChats({
   account,
+  filters,
   onSelect,
+  onToggleMonitor,
+  busy,
 }: {
   account: ChatTreeAccount;
+  filters: Filters;
   onSelect: (c: ChatNode) => void;
+  onToggleMonitor: (c: ChatNode) => void;
+  busy: boolean;
 }) {
-  const chats = useMemo(
-    () => [...account.chats].sort((a, b) => b.messages_total - a.messages_total),
-    [account.chats],
-  );
-  const maxMsg = Math.max(...chats.map((c) => c.messages_total), 1);
-
-  // Два кольца при большом числе чатов: активные ближе к центру, остальные
-  // дальше — так подписи не наслаиваются и остаётся воздух.
-  const twoRings = chats.length > 14;
-  const inner = twoRings ? chats.filter((_, i) => i % 2 === 0) : chats;
-  const outer = twoRings ? chats.filter((_, i) => i % 2 === 1) : [];
-
-  const size = 900;
-  const cx = size / 2;
-  const cy = size / 2;
-  const rInner = twoRings ? 250 : 300;
-  const rOuter = 380;
-
-  const place = (list: ChatNode[], ringRadius: number, offset: number) =>
-    list.map((chat, i) => {
-      const angle = ((i + offset) / Math.max(list.length, 1)) * Math.PI * 2 - Math.PI / 2;
-      return { chat, x: cx + Math.cos(angle) * ringRadius, y: cy + Math.sin(angle) * ringRadius };
+  const rows = useMemo(() => {
+    const q = filters.query.trim().toLowerCase();
+    let list = account.chats.filter((c) => {
+      if (filters.type !== 'all' && kindOf(c.type) !== filters.type) return false;
+      if (filters.leadsOnly && c.leads_count === 0) return false;
+      if (filters.monitoredOnly && !c.monitored) return false;
+      if (q) {
+        const hay = `${c.title ?? ''} ${c.username ?? ''} ${c.tg_chat_id}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
     });
-
-  const nodes = [...place(inner, rInner, 0), ...place(outer, rOuter, 0.5)];
+    const key =
+      filters.sort === 'leads'
+        ? (c: ChatNode) => c.leads_count * 1e6 + c.messages_total
+        : filters.sort === 'replies'
+          ? (c: ChatNode) => c.replies_count
+          : (c: ChatNode) => c.messages_total;
+    list = [...list].sort((a, b) => key(b) - key(a));
+    return list;
+  }, [account.chats, filters]);
 
   return (
-    <div className="overflow-auto">
-      <svg
-        viewBox={`0 0 ${size} ${size}`}
-        className="mx-auto block h-auto w-full"
-        style={{ minWidth: 640, maxWidth: 860 }}
-      >
-        <defs>
-          {nodes.map(({ chat }) => {
-            const r = 18 + (chat.messages_total / maxMsg) * 20;
-            return (
-              <clipPath key={`clip-${chat.id}`} id={`clip-${chat.id}`}>
-                <circle cx="0" cy="0" r={r} />
-              </clipPath>
-            );
-          })}
-        </defs>
-
-        {nodes.map(({ chat, x, y }) => (
-          <line
-            key={`e-${chat.id}`}
-            x1={cx}
-            y1={cy}
-            x2={x}
-            y2={y}
-            stroke={chat.leads_count > 0 ? '#34d39955' : '#33415544'}
-            strokeWidth={chat.monitored ? 1.5 : 1}
-          />
-        ))}
-
-        {nodes.map(({ chat, x, y }) => {
-          const r = 18 + (chat.messages_total / maxMsg) * 20;
-          const label =
-            chat.title ?? (chat.username ? `@${chat.username}` : String(chat.tg_chat_id));
-          const ring = chat.leads_count > 0 ? '#34d399' : chat.monitored ? '#38bdf8' : '#475569';
-          return (
-            <g key={chat.id} className="cursor-pointer" onClick={() => onSelect(chat)}>
-              <circle cx={x} cy={y} r={r} fill="#0f172a" opacity={chat.monitored ? 1 : 0.45} />
-              <g transform={`translate(${x},${y})`} clipPath={`url(#clip-${chat.id})`}>
-                {chat.has_avatar && (
-                  <image
-                    href={`/api/chats/${chat.id}/avatar`}
-                    x={-r}
-                    y={-r}
-                    width={r * 2}
-                    height={r * 2}
-                    preserveAspectRatio="xMidYMid slice"
-                    opacity={chat.monitored ? 1 : 0.4}
-                  />
-                )}
-              </g>
-              {!chat.has_avatar && (
-                <text
-                  x={x}
-                  y={y + 4}
-                  textAnchor="middle"
-                  fontSize={r * 0.7}
-                  className="fill-slate-500"
-                >
-                  {(label[0] || '#').toUpperCase()}
-                </text>
-              )}
-              <circle
-                cx={x}
-                cy={y}
-                r={r}
-                fill="none"
-                stroke={ring}
-                strokeWidth={chat.leads_count > 0 ? 3 : 1.5}
-              />
-              <circle
-                cx={x + r * 0.7}
-                cy={y - r * 0.7}
-                r={9}
-                fill="#0b1220"
-                stroke={ring}
-                strokeWidth="1"
-              />
-              <text
-                x={x + r * 0.7}
-                y={y - r * 0.7 + 3}
-                textAnchor="middle"
-                fontSize="8"
-                className="fill-slate-200"
+    <Card
+      title={
+        <span className="flex items-center gap-2">
+          {account.label}
+          <Badge tone="ok">{account.leads_count} лидов</Badge>
+          <span className="text-xs font-normal text-slate-500">{rows.length} чатов в списке</span>
+        </span>
+      }
+    >
+      {rows.length === 0 ? (
+        <Empty>Под фильтр ничего не подошло</Empty>
+      ) : (
+        <ul className="divide-y divide-ink-800/70">
+          {rows.map((chat) => (
+            <li key={chat.id}>
+              <div
+                className={`flex items-center gap-3 py-2.5 ${
+                  chat.leads_count > 0 ? 'pl-3 -ml-3 border-l-2 border-emerald-500/60' : ''
+                }`}
               >
-                {chat.messages_total}
-              </text>
-              <text x={x} y={y + r + 13} textAnchor="middle" fontSize="10" className="fill-slate-400">
-                {label.length > 14 ? label.slice(0, 13) + '…' : label}
-              </text>
-              {chat.leads_count > 0 && (
-                <text
-                  x={x}
-                  y={y + r + 25}
-                  textAnchor="middle"
-                  fontSize="9"
-                  className="fill-emerald-300"
+                <button
+                  onClick={() => onSelect(chat)}
+                  className="flex min-w-0 flex-1 items-center gap-3 text-left"
                 >
-                  {chat.leads_count} лид
-                </text>
-              )}
-            </g>
-          );
-        })}
+                  <ChatAvatar
+                    chatId={chat.id}
+                    title={chat.title}
+                    hasAvatar={chat.has_avatar}
+                    size={34}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`truncate text-sm ${chat.monitored ? 'text-slate-100' : 'text-slate-400'}`}
+                      >
+                        {chatName(chat)}
+                      </span>
+                      <span className="shrink-0 text-[10px] uppercase tracking-wide text-slate-600">
+                        {KIND_LABEL[kindOf(chat.type)]}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-slate-500">
+                      <span>{chat.messages_total} сообщ.</span>
+                      <span>{chat.replies_count} ответов</span>
+                      <span>{chat.active_users} чел.</span>
+                      {chat.leads_count > 0 && (
+                        <span className="font-medium text-emerald-300">{chat.leads_count} лид</span>
+                      )}
+                    </div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => onToggleMonitor(chat)}
+                  disabled={busy}
+                  title={
+                    chat.monitored
+                      ? 'Слежка включена — правила работают. Нажмите, чтобы выключить'
+                      : 'Слежка выключена. Нажмите, чтобы включить'
+                  }
+                  className={`shrink-0 rounded-lg border px-2.5 py-1 text-xs font-medium transition disabled:opacity-40 ${
+                    chat.monitored
+                      ? 'border-sky-500/30 bg-sky-500/15 text-sky-300'
+                      : 'border-ink-600 text-slate-400 hover:bg-ink-800'
+                  }`}
+                >
+                  {chat.monitored ? '● слежка' : '○ слежка'}
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
 
-        <circle cx={cx} cy={cy} r={52} fill="#0b1220" stroke="#4f8cff" strokeWidth="3" />
-        <text
-          x={cx}
-          y={cy - 4}
-          textAnchor="middle"
-          fontSize="15"
-          fontWeight="600"
-          className="fill-slate-100"
+function Seg({
+  value,
+  onChange,
+  options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: [string, string][];
+}) {
+  return (
+    <div className="inline-flex rounded-lg border border-ink-700 bg-ink-950 p-0.5 text-xs">
+      {options.map(([v, label]) => (
+        <button
+          key={v}
+          onClick={() => onChange(v)}
+          className={`rounded-md px-2.5 py-1 transition ${
+            value === v ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:text-slate-200'
+          }`}
         >
-          {account.label.length > 12 ? account.label.slice(0, 11) + '…' : account.label}
-        </text>
-        <text x={cx} y={cy + 14} textAnchor="middle" fontSize="12" className="fill-emerald-300">
-          {account.leads_count} лидов
-        </text>
-      </svg>
+          {label}
+        </button>
+      ))}
     </div>
   );
+}
+
+function toggleClass(active: boolean, tone: 'ok' | 'info'): string {
+  const on =
+    tone === 'ok'
+      ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-300'
+      : 'border-sky-500/30 bg-sky-500/15 text-sky-300';
+  return `inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+    active ? on : 'border-ink-600 text-slate-400 hover:bg-ink-800'
+  }`;
 }
