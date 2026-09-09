@@ -89,7 +89,7 @@ export default function TreePage() {
       </div>
 
       {tree.data?.map((account) => (
-        <SunburstCard
+        <TreeView
           key={`sb-${account.account_id}`}
           account={account}
           onSelect={(chat) => setSelected({ account: account.label, chat })}
@@ -359,29 +359,8 @@ const KIND_TITLE: Record<Exclude<TypeFilter, 'all'>, string> = {
   channel: 'Каналы',
 };
 
-function polar(cx: number, cy: number, r: number, a: number): [number, number] {
-  return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
-}
-
-function annular(
-  cx: number,
-  cy: number,
-  rI: number,
-  rO: number,
-  a0: number,
-  a1: number,
-): string {
-  const large = a1 - a0 > Math.PI ? 1 : 0;
-  const [x0, y0] = polar(cx, cy, rO, a0);
-  const [x1, y1] = polar(cx, cy, rO, a1);
-  const [x2, y2] = polar(cx, cy, rI, a1);
-  const [x3, y3] = polar(cx, cy, rI, a0);
-  return `M${x0} ${y0} A${rO} ${rO} 0 ${large} 1 ${x1} ${y1} L${x2} ${y2} A${rI} ${rI} 0 ${large} 0 ${x3} ${y3} Z`;
-}
-
-/** Радиальная инфографика «дерево»: центр — аккаунт, кольцо — категории,
- *  внешние дольки — чаты (зелёные = есть лиды, сгруппированы по категории). */
-function SunburstCard({
+/** Дерево-схема: аккаунт → категории → чаты с лидами. Подписано, читаемо. */
+function TreeView({
   account,
   onSelect,
 }: {
@@ -393,157 +372,109 @@ function SunburstCard({
     for (const c of account.chats) by[kindOf(c.type)].push(c);
     const order: Exclude<TypeFilter, 'all'>[] = ['group', 'dm', 'channel'];
     return order
-      .map((kind) => ({
-        kind,
-        chats: [...by[kind]].sort(
+      .map((kind) => {
+        const chats = [...by[kind]].sort(
           (a, b) => b.leads_count - a.leads_count || b.messages_total - a.messages_total,
-        ),
-      }))
+        );
+        return {
+          kind,
+          chats,
+          leads: chats.reduce((s, c) => s + c.leads_count, 0),
+          withLeads: chats.filter((c) => c.leads_count > 0).length,
+        };
+      })
       .filter((g) => g.chats.length > 0);
   }, [account.chats]);
 
-  const size = 560;
-  const cx = size / 2;
-  const cy = size / 2;
-  const ri0 = 62;
-  const ri1 = 132;
-  const ro0 = 138;
-  const ro1 = 250;
-  const gap = 0.02;
-
-  const weight = (c: ChatNode) => Math.max(c.messages_total, 1);
-  const grand = groups.reduce((s, g) => s + g.chats.reduce((ss, c) => ss + weight(c), 0), 0) || 1;
-
-  const catSegs: { kind: Exclude<TypeFilter, 'all'>; a0: number; a1: number }[] = [];
-  const chatSegs: { chat: ChatNode; kind: Exclude<TypeFilter, 'all'>; a0: number; a1: number }[] =
-    [];
-  const catLabels: {
-    kind: Exclude<TypeFilter, 'all'>;
-    mid: number;
-    count: number;
-    leads: number;
-  }[] = [];
-
-  let a = -Math.PI / 2;
-  for (const g of groups) {
-    const gw = g.chats.reduce((s, c) => s + weight(c), 0);
-    const span = (gw / grand) * (Math.PI * 2 - gap * groups.length);
-    const a0 = a;
-    const a1 = a + span;
-    catSegs.push({ kind: g.kind, a0, a1 });
-    catLabels.push({
-      kind: g.kind,
-      mid: (a0 + a1) / 2,
-      count: g.chats.length,
-      leads: g.chats.reduce((s, c) => s + c.leads_count, 0),
-    });
-    let ca = a0;
-    for (const c of g.chats) {
-      const cspan = (weight(c) / gw) * span;
-      chatSegs.push({ chat: c, kind: g.kind, a0: ca, a1: ca + cspan });
-      ca += cspan;
-    }
-    a = a1 + gap;
-  }
+  // По умолчанию раскрыты категории, где есть лиды.
+  const [open, setOpen] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(groups.map((g) => [g.kind, g.leads > 0])),
+  );
+  const [showAll, setShowAll] = useState<Record<string, boolean>>({});
+  const TOP = 8;
 
   return (
-    <Card title={`${account.label} · инфографика`} className="mb-4">
-      <div className="overflow-auto">
-        <svg
-          viewBox={`0 0 ${size} ${size}`}
-          className="mx-auto block h-auto w-full"
-          style={{ maxWidth: 520 }}
-        >
-          {/* внешнее кольцо: чаты */}
-          {chatSegs.map(({ chat, kind, a0, a1 }) => {
-            const hasLead = chat.leads_count > 0;
-            const fill = hasLead ? '#34d399' : KIND_COLOR[kind];
-            const op = hasLead ? 0.9 : chat.monitored ? 0.4 : 0.16;
-            return (
-              <path
-                key={chat.id}
-                d={annular(cx, cy, ro0, ro1, a0, a1)}
-                fill={fill}
-                fillOpacity={op}
-                stroke="#0b1220"
-                strokeWidth={0.5}
-                className="cursor-pointer transition-opacity hover:fill-opacity-100"
-                onClick={() => onSelect(chat)}
-              >
-                <title>
-                  {chatName(chat)} · {chat.messages_total} сообщ.
-                  {hasLead ? ` · ${chat.leads_count} лид` : ''}
-                </title>
-              </path>
-            );
-          })}
-
-          {/* внутреннее кольцо: категории */}
-          {catSegs.map(({ kind, a0, a1 }) => (
-            <path
-              key={kind}
-              d={annular(cx, cy, ri0, ri1, a0, a1)}
-              fill={KIND_COLOR[kind]}
-              fillOpacity={0.85}
-              stroke="#0b1220"
-              strokeWidth={1}
-            />
-          ))}
-          {catLabels.map(({ kind, mid, count, leads }) => {
-            const [lx, ly] = polar(cx, cy, (ri0 + ri1) / 2, mid);
-            return (
-              <g key={`l-${kind}`} pointerEvents="none">
-                <text
-                  x={lx}
-                  y={ly - 4}
-                  textAnchor="middle"
-                  fontSize="13"
-                  fontWeight="600"
-                  className="fill-white"
-                >
-                  {KIND_TITLE[kind]}
-                </text>
-                <text x={lx} y={ly + 11} textAnchor="middle" fontSize="10" className="fill-white/80">
-                  {count} · {leads} лид
-                </text>
-              </g>
-            );
-          })}
-
-          {/* центр: аккаунт */}
-          <circle cx={cx} cy={cy} r={54} fill="#0b1220" stroke="#4f8cff" strokeWidth="3" />
-          <text
-            x={cx}
-            y={cy - 4}
-            textAnchor="middle"
-            fontSize="14"
-            fontWeight="600"
-            className="fill-slate-100"
-          >
-            {account.label.length > 12 ? account.label.slice(0, 11) + '…' : account.label}
-          </text>
-          <text x={cx} y={cy + 16} textAnchor="middle" fontSize="13" className="fill-emerald-300">
-            {account.leads_count} лидов
-          </text>
-        </svg>
+    <Card className="mb-4">
+      {/* корень */}
+      <div className="flex items-center gap-2">
+        <span className="h-3 w-3 rounded-full bg-accent ring-4 ring-accent/20" />
+        <span className="text-sm font-semibold text-slate-100">{account.label}</span>
+        <Badge tone="ok">{account.leads_count} лидов</Badge>
+        <span className="text-xs text-slate-500">{account.chats.length} чатов</span>
       </div>
-      <div className="mt-3 flex flex-wrap justify-center gap-x-4 gap-y-1 text-xs text-slate-400">
-        <LegendDot color="#34d399" label="есть лиды" />
-        <LegendDot color={KIND_COLOR.dm} label="личка" />
-        <LegendDot color={KIND_COLOR.group} label="группы" />
-        <LegendDot color={KIND_COLOR.channel} label="каналы" />
-        <span className="text-slate-600">размер дольки — активность · клик → детали</span>
+
+      <div className="ml-[5px] mt-1 space-y-1 border-l border-ink-700 pl-4">
+        {groups.map((g) => {
+          const isOpen = open[g.kind] ?? false;
+          const base = g.withLeads > 0 ? g.chats.filter((c) => c.leads_count > 0) : g.chats;
+          const shown = showAll[g.kind] ? g.chats : base.slice(0, TOP);
+          const rest = g.chats.length - shown.length;
+          return (
+            <div key={g.kind}>
+              <button
+                onClick={() => setOpen((s) => ({ ...s, [g.kind]: !isOpen }))}
+                className="flex w-full items-center gap-2 rounded-md py-1 text-left hover:bg-ink-800/50"
+              >
+                <span className="text-xs text-slate-500">{isOpen ? '▾' : '▸'}</span>
+                <span
+                  className="h-2.5 w-2.5 rounded-sm"
+                  style={{ backgroundColor: KIND_COLOR[g.kind] }}
+                />
+                <span className="text-sm font-medium text-slate-200">{KIND_TITLE[g.kind]}</span>
+                <span className="text-xs text-slate-500">{g.chats.length}ч</span>
+                {g.leads > 0 && (
+                  <span className="text-xs font-medium text-emerald-300">· {g.leads} лид</span>
+                )}
+              </button>
+
+              {isOpen && (
+                <div className="ml-[4px] space-y-0.5 border-l border-ink-800 pl-4">
+                  {shown.map((c) => (
+                    <button
+                      key={c.id}
+                      onClick={() => onSelect(c)}
+                      className="flex w-full items-center gap-2 rounded-md py-1 pr-2 text-left hover:bg-ink-800/60"
+                    >
+                      <span className="text-ink-600">└</span>
+                      <ChatAvatar
+                        chatId={c.id}
+                        title={c.title}
+                        hasAvatar={c.has_avatar}
+                        size={22}
+                      />
+                      <span
+                        className={`min-w-0 flex-1 truncate text-sm ${
+                          c.monitored ? 'text-slate-200' : 'text-slate-500'
+                        }`}
+                      >
+                        {chatName(c)}
+                      </span>
+                      {c.leads_count > 0 && (
+                        <span className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-xs font-medium text-emerald-300">
+                          {c.leads_count} лид
+                        </span>
+                      )}
+                      <span className="shrink-0 text-xs text-slate-600">{c.messages_total}</span>
+                    </button>
+                  ))}
+                  {rest > 0 && (
+                    <button
+                      onClick={() => setShowAll((s) => ({ ...s, [g.kind]: true }))}
+                      className="py-1 pl-5 text-xs text-slate-500 hover:text-slate-300"
+                    >
+                      … ещё {rest} {rest === 1 ? 'чат' : 'чатов'}
+                    </button>
+                  )}
+                  {shown.length === 0 && (
+                    <div className="py-1 pl-5 text-xs text-slate-600">нет чатов</div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </Card>
-  );
-}
-
-function LegendDot({ color, label }: { color: string; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: color }} />
-      {label}
-    </span>
   );
 }
 
