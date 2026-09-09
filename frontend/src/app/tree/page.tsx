@@ -1,7 +1,7 @@
 'use client';
 
 import { Filter, Search, Target } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 
 import { Shell } from '@/components/shell';
 import {
@@ -89,7 +89,7 @@ export default function TreePage() {
       </div>
 
       {tree.data?.map((account) => (
-        <TreeView
+        <RadialGraph
           key={`sb-${account.account_id}`}
           account={account}
           onSelect={(chat) => setSelected({ account: account.label, chat })}
@@ -348,131 +348,199 @@ function AccountChats({
   );
 }
 
-const KIND_COLOR: Record<Exclude<TypeFilter, 'all'>, string> = {
-  group: '#6366f1',
-  dm: '#38bdf8',
-  channel: '#64748b',
-};
-const KIND_TITLE: Record<Exclude<TypeFilter, 'all'>, string> = {
-  group: 'Группы',
-  dm: 'Личка',
-  channel: 'Каналы',
-};
+interface Placed {
+  chat: ChatNode;
+  x: number;
+  y: number;
+  r: number;
+}
 
-/** Дерево-схема: аккаунт → категории → чаты с лидами. Подписано, читаемо. */
-function TreeView({
+/** Радиальный граф: аккаунт в центре, линии к чатам (с лидами и без).
+ *  Читаемость даёт зум и панорама + раскладка по кольцам (лиды — ближе к центру). */
+function RadialGraph({
   account,
   onSelect,
 }: {
   account: ChatTreeAccount;
   onSelect: (c: ChatNode) => void;
 }) {
-  const groups = useMemo(() => {
-    const by: Record<Exclude<TypeFilter, 'all'>, ChatNode[]> = { group: [], dm: [], channel: [] };
-    for (const c of account.chats) by[kindOf(c.type)].push(c);
-    const order: Exclude<TypeFilter, 'all'>[] = ['group', 'dm', 'channel'];
-    return order
-      .map((kind) => {
-        const chats = [...by[kind]].sort(
-          (a, b) => b.leads_count - a.leads_count || b.messages_total - a.messages_total,
-        );
-        return {
-          kind,
-          chats,
-          leads: chats.reduce((s, c) => s + c.leads_count, 0),
-          withLeads: chats.filter((c) => c.leads_count > 0).length,
-        };
-      })
-      .filter((g) => g.chats.length > 0);
-  }, [account.chats]);
+  const [view, setView] = useState({ k: 1, x: 0, y: 0 });
+  const [hover, setHover] = useState<string | null>(null);
+  const [leadsOnly, setLeadsOnly] = useState(false);
+  const drag = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
 
-  // По умолчанию раскрыты категории, где есть лиды.
-  const [open, setOpen] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(groups.map((g) => [g.kind, g.leads > 0])),
-  );
-  const [showAll, setShowAll] = useState<Record<string, boolean>>({});
-  const TOP = 8;
+  const SIZE = 900;
+  const C = SIZE / 2;
+
+  const nodes = useMemo<Placed[]>(() => {
+    let chats = [...account.chats].sort(
+      (a, b) => b.leads_count - a.leads_count || b.messages_total - a.messages_total,
+    );
+    if (leadsOnly) chats = chats.filter((c) => c.leads_count > 0);
+    const maxMsg = Math.max(...chats.map((c) => c.messages_total), 1);
+    const rOf = (c: ChatNode) => 9 + (c.messages_total / maxMsg) * 17;
+
+    // Кольца: чем дальше, тем больше вмещается. Заполняем от центра — важные
+    // (лиды/активность) оказываются на ближних кольцах.
+    const placed: Placed[] = [];
+    let idx = 0;
+    let ring = 0;
+    while (idx < chats.length) {
+      const radius = 150 + ring * 96;
+      const capacity = Math.max(6, Math.floor((2 * Math.PI * radius) / 58));
+      const count = Math.min(capacity, chats.length - idx);
+      const offset = ring * 0.4; // разворот колец, чтобы спицы не совпадали
+      for (let i = 0; i < count; i++) {
+        const c = chats[idx + i];
+        const angle = ((i + offset) / count) * Math.PI * 2 - Math.PI / 2;
+        placed.push({
+          chat: c,
+          x: C + Math.cos(angle) * radius,
+          y: C + Math.sin(angle) * radius,
+          r: rOf(c),
+        });
+      }
+      idx += count;
+      ring += 1;
+    }
+    return placed;
+  }, [account.chats, leadsOnly]);
+
+  function zoomAt(clientX: number, clientY: number, factor: number) {
+    const rect = svgRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setView((v) => {
+      const k2 = Math.min(5, Math.max(0.35, v.k * factor));
+      // экранная точка в координатах svg
+      const sx = ((clientX - rect.left) / rect.width) * SIZE;
+      const sy = ((clientY - rect.top) / rect.height) * SIZE;
+      // мир под курсором остаётся на месте
+      const wx = (sx - v.x) / v.k;
+      const wy = (sy - v.y) / v.k;
+      return { k: k2, x: sx - wx * k2, y: sy - wy * k2 };
+    });
+  }
 
   return (
     <Card className="mb-4">
-      {/* корень */}
-      <div className="flex items-center gap-2">
-        <span className="h-3 w-3 rounded-full bg-accent ring-4 ring-accent/20" />
-        <span className="text-sm font-semibold text-slate-100">{account.label}</span>
-        <Badge tone="ok">{account.leads_count} лидов</Badge>
-        <span className="text-xs text-slate-500">{account.chats.length} чатов</span>
+      <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+        <span className="mr-auto">
+          Аккаунт в центре, линии к чатам. Зелёные — есть лиды. Колесо — зум, тяни — двигать
+        </span>
+        <button onClick={() => setLeadsOnly((v) => !v)} className={toggleClass(leadsOnly, 'ok')}>
+          <Target size={13} /> только с лидами
+        </button>
+        <button
+          onClick={() => setView({ k: 1, x: 0, y: 0 })}
+          className="rounded-lg border border-ink-600 px-2.5 py-1.5 text-xs text-slate-400 hover:bg-ink-800"
+        >
+          сбросить вид
+        </button>
       </div>
-
-      <div className="ml-[5px] mt-1 space-y-1 border-l border-ink-700 pl-4">
-        {groups.map((g) => {
-          const isOpen = open[g.kind] ?? false;
-          const base = g.withLeads > 0 ? g.chats.filter((c) => c.leads_count > 0) : g.chats;
-          const shown = showAll[g.kind] ? g.chats : base.slice(0, TOP);
-          const rest = g.chats.length - shown.length;
-          return (
-            <div key={g.kind}>
-              <button
-                onClick={() => setOpen((s) => ({ ...s, [g.kind]: !isOpen }))}
-                className="flex w-full items-center gap-2 rounded-md py-1 text-left hover:bg-ink-800/50"
-              >
-                <span className="text-xs text-slate-500">{isOpen ? '▾' : '▸'}</span>
-                <span
-                  className="h-2.5 w-2.5 rounded-sm"
-                  style={{ backgroundColor: KIND_COLOR[g.kind] }}
+      <div className="overflow-hidden rounded-xl border border-ink-800 bg-ink-950">
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${SIZE} ${SIZE}`}
+          className="block h-[560px] w-full touch-none select-none"
+          onWheel={(e) => zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.12 : 1 / 1.12)}
+          onPointerDown={(e) => {
+            (e.target as Element).setPointerCapture?.(e.pointerId);
+            drag.current = { x: e.clientX, y: e.clientY, px: view.x, py: view.y };
+          }}
+          onPointerMove={(e) => {
+            if (!drag.current || !svgRef.current) return;
+            const rect = svgRef.current.getBoundingClientRect();
+            const dx = ((e.clientX - drag.current.x) / rect.width) * SIZE;
+            const dy = ((e.clientY - drag.current.y) / rect.height) * SIZE;
+            setView((v) => ({ ...v, x: drag.current!.px + dx, y: drag.current!.py + dy }));
+          }}
+          onPointerUp={() => (drag.current = null)}
+          onPointerLeave={() => (drag.current = null)}
+        >
+          <g transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
+            {/* линии */}
+            {nodes.map(({ chat, x, y }) => {
+              const lead = chat.leads_count > 0;
+              return (
+                <line
+                  key={`e-${chat.id}`}
+                  x1={C}
+                  y1={C}
+                  x2={x}
+                  y2={y}
+                  stroke={lead ? '#34d399' : '#334155'}
+                  strokeOpacity={lead ? 0.7 : hover === chat.id ? 0.8 : 0.3}
+                  strokeWidth={lead ? 1.6 : 1}
                 />
-                <span className="text-sm font-medium text-slate-200">{KIND_TITLE[g.kind]}</span>
-                <span className="text-xs text-slate-500">{g.chats.length}ч</span>
-                {g.leads > 0 && (
-                  <span className="text-xs font-medium text-emerald-300">· {g.leads} лид</span>
-                )}
-              </button>
-
-              {isOpen && (
-                <div className="ml-[4px] space-y-0.5 border-l border-ink-800 pl-4">
-                  {shown.map((c) => (
-                    <button
-                      key={c.id}
-                      onClick={() => onSelect(c)}
-                      className="flex w-full items-center gap-2 rounded-md py-1 pr-2 text-left hover:bg-ink-800/60"
+              );
+            })}
+            {/* узлы */}
+            {nodes.map(({ chat, x, y, r }) => {
+              const lead = chat.leads_count > 0;
+              const ring = lead ? '#34d399' : chat.monitored ? '#38bdf8' : '#475569';
+              const showLabel = lead || hover === chat.id || view.k >= 1.8;
+              const label = chatName(chat);
+              return (
+                <g
+                  key={chat.id}
+                  className="cursor-pointer"
+                  onClick={() => onSelect(chat)}
+                  onPointerEnter={() => setHover(chat.id)}
+                  onPointerLeave={() => setHover((h) => (h === chat.id ? null : h))}
+                >
+                  <circle
+                    cx={x}
+                    cy={y}
+                    r={r}
+                    fill="#0f172a"
+                    stroke={ring}
+                    strokeWidth={lead ? 2.5 : 1.4}
+                    opacity={chat.monitored || lead ? 1 : 0.6}
+                  />
+                  {lead && (
+                    <text
+                      x={x}
+                      y={y + 3}
+                      textAnchor="middle"
+                      fontSize={9}
+                      fontWeight="700"
+                      className="fill-emerald-300"
                     >
-                      <span className="text-ink-600">└</span>
-                      <ChatAvatar
-                        chatId={c.id}
-                        title={c.title}
-                        hasAvatar={c.has_avatar}
-                        size={22}
-                      />
-                      <span
-                        className={`min-w-0 flex-1 truncate text-sm ${
-                          c.monitored ? 'text-slate-200' : 'text-slate-500'
-                        }`}
-                      >
-                        {chatName(c)}
-                      </span>
-                      {c.leads_count > 0 && (
-                        <span className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-xs font-medium text-emerald-300">
-                          {c.leads_count} лид
-                        </span>
-                      )}
-                      <span className="shrink-0 text-xs text-slate-600">{c.messages_total}</span>
-                    </button>
-                  ))}
-                  {rest > 0 && (
-                    <button
-                      onClick={() => setShowAll((s) => ({ ...s, [g.kind]: true }))}
-                      className="py-1 pl-5 text-xs text-slate-500 hover:text-slate-300"
+                      {chat.leads_count}
+                    </text>
+                  )}
+                  {showLabel && (
+                    <text
+                      x={x}
+                      y={y + r + 11}
+                      textAnchor="middle"
+                      fontSize={10}
+                      className={lead ? 'fill-slate-200' : 'fill-slate-400'}
                     >
-                      … ещё {rest} {rest === 1 ? 'чат' : 'чатов'}
-                    </button>
+                      {label.length > 18 ? label.slice(0, 17) + '…' : label}
+                    </text>
                   )}
-                  {shown.length === 0 && (
-                    <div className="py-1 pl-5 text-xs text-slate-600">нет чатов</div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
+                </g>
+              );
+            })}
+            {/* центр: аккаунт */}
+            <circle cx={C} cy={C} r={54} fill="#0b1220" stroke="#4f8cff" strokeWidth="3" />
+            <text
+              x={C}
+              y={C - 4}
+              textAnchor="middle"
+              fontSize="15"
+              fontWeight="600"
+              className="fill-slate-100"
+            >
+              {account.label.length > 12 ? account.label.slice(0, 11) + '…' : account.label}
+            </text>
+            <text x={C} y={C + 15} textAnchor="middle" fontSize="12" className="fill-emerald-300">
+              {account.leads_count} лидов
+            </text>
+          </g>
+        </svg>
       </div>
     </Card>
   );
