@@ -104,7 +104,7 @@ async def engage_user_stories(
                         add_to_recent=True,
                     )
                 )
-            except Exception as exc:  # noqa: BLE001, PERF203 — этот вариант не подошёл
+            except Exception as exc:  # noqa: BLE001 — этот вариант реакции не подошёл
                 logger.debug("story_like_send_failed", detail=str(exc)[:120], emoji=emo)
                 continue
             # Проверяем, что реакция реально применилась (иначе логировали бы
