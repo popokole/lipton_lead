@@ -32,8 +32,8 @@ async def read_story_stats(redis: Any, tz_offset: int) -> dict[str, Any]:
     for raw in await redis.lrange("story:recent", 0, 19):
         try:
             recent.append(json.loads(raw))
-        except Exception:  # noqa: BLE001, PERF203 — битую запись пропускаем
-            continue
+        except (ValueError, TypeError):
+            continue  # битую запись пропускаем
 
     return {
         "viewed_today": await _int(f"story:viewed:{day}"),
