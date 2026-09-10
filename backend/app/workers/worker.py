@@ -841,7 +841,7 @@ class Worker:
             "📊 <b>Истории — авто-просмотр</b>",
             f"👁 просмотрено сегодня: {stats['viewed_today']} · всего: {stats['viewed_total']}",
             f"❤️ лайков сегодня: {stats['liked_today']} · всего: {stats['liked_total']}",
-            f"👍 реакций на посты сегодня: {stats['reacted_today']} · всего: {stats['reacted_total']}",
+            f"👍 реакций сегодня: {stats['reacted_today']} · всего: {stats['reacted_total']}",
         ]
         if stats["recent"]:
             lines.append("\n<b>Последние:</b>")
