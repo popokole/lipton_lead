@@ -42,6 +42,8 @@ async def read_story_stats(redis: Any, tz_offset: int) -> dict[str, Any]:
         "liked_today": await _int(f"story:liked:{day}"),
         "viewed_total": await _int("story:viewed:total"),
         "liked_total": await _int("story:liked:total"),
+        "reacted_today": await _int(f"react:{day}"),
+        "reacted_total": await _int("react:total"),
         "recent": recent,
     }
 

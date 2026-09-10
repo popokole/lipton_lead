@@ -181,7 +181,124 @@ export default function SettingsPage() {
       <div className="mt-6">
         <StoriesCard />
       </div>
+      <div className="mt-6">
+        <ReactionsCard />
+      </div>
     </Shell>
+  );
+}
+
+interface ReactionState {
+  enabled: boolean;
+  per_hour: number;
+  fresh_window_hours: number;
+  per_chat_cooldown_minutes: number;
+}
+
+/** Авто-реакции на посты в чатах (прогрев/охват). */
+function ReactionsCard() {
+  const [st, setSt] = useState<ReactionState | null>(null);
+  const [perHour, setPerHour] = useState('15');
+  const [freshH, setFreshH] = useState('6');
+  const [chatCd, setChatCd] = useState('30');
+  const [error, setError] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const s = await api.get<ReactionState>('/reactions');
+        setSt(s);
+        setPerHour(String(s.per_hour));
+        setFreshH(String(s.fresh_window_hours));
+        setChatCd(String(s.per_chat_cooldown_minutes));
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : String(err));
+      }
+    })();
+  }, []);
+
+  async function save(patch: Record<string, unknown>) {
+    setBusy(true);
+    setError(null);
+    setMsg(null);
+    try {
+      const s = await api.put<ReactionState>('/reactions', patch);
+      setSt(s);
+      setMsg('Сохранено');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card title="Авто-реакции на посты (прогрев)">
+      <p className="mb-4 text-sm text-slate-400">
+        Аккаунт ставит эмодзи-реакцию (👍 ❤ 🔥…) на свежие сообщения в отслеживаемых группах —
+        мягкий охват без спама. Реакции заметнее просмотра историй, держите темп низким.
+      </p>
+      {error && <ErrorText>{error}</ErrorText>}
+      {msg && (
+        <p className="mb-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
+          {msg}
+        </p>
+      )}
+
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Field label="Реакций в час" hint="Потолок. Безопасно 10–20">
+          <input
+            className={inputClass}
+            value={perHour}
+            onChange={(e) => setPerHour(e.target.value.replace(/\D/g, ''))}
+          />
+        </Field>
+        <Field label="Свежесть поста, часов" hint="Реагируем только на недавние">
+          <input
+            className={inputClass}
+            value={freshH}
+            onChange={(e) => setFreshH(e.target.value.replace(/\D/g, ''))}
+          />
+        </Field>
+        <Field label="Пауза на чат, минут" hint="Не чаще одной реакции в чат">
+          <input
+            className={inputClass}
+            value={chatCd}
+            onChange={(e) => setChatCd(e.target.value.replace(/\D/g, ''))}
+          />
+        </Field>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <Button
+          disabled={busy}
+          onClick={() =>
+            save({
+              per_hour: Number(perHour) || 15,
+              fresh_window_hours: Number(freshH) || 6,
+              per_chat_cooldown_minutes: Number(chatCd) || 30,
+            })
+          }
+        >
+          {busy ? 'Сохраняем…' : 'Сохранить'}
+        </Button>
+        <label className="flex items-center gap-2 text-sm text-slate-300">
+          <input
+            type="checkbox"
+            checked={st?.enabled ?? false}
+            disabled={busy}
+            onChange={(e) => save({ enabled: e.target.checked })}
+            className="h-4 w-4 rounded border-ink-600 bg-ink-950"
+          />
+          Включить авто-реакции
+        </label>
+        <span className="text-xs text-slate-500">
+          {st?.enabled ? 'работает в рабочие часы' : 'выключено'}
+        </span>
+      </div>
+    </Card>
   );
 }
 

@@ -43,6 +43,8 @@ class StoryStatOut(BaseModel):
     liked_today: int
     viewed_total: int
     liked_total: int
+    reacted_today: int = 0
+    reacted_total: int = 0
     recent: list[dict[str, Any]]
 
 

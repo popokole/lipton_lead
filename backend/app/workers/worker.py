@@ -135,6 +135,7 @@ class Worker:
             asyncio.create_task(self._digest_loop(), name="worker-digest"),
             asyncio.create_task(self._reconcile_loop(), name="worker-reconcile"),
             asyncio.create_task(self._story_loop(), name="worker-stories"),
+            asyncio.create_task(self._reaction_loop(), name="worker-reactions"),
         ]
         self.set_status(STATUS_HEALTHY)
         await self._sync_status_to_db()
@@ -840,6 +841,7 @@ class Worker:
             "📊 <b>Истории — авто-просмотр</b>",
             f"👁 просмотрено сегодня: {stats['viewed_today']} · всего: {stats['viewed_total']}",
             f"❤️ лайков сегодня: {stats['liked_today']} · всего: {stats['liked_total']}",
+            f"👍 реакций на посты сегодня: {stats['reacted_today']} · всего: {stats['reacted_total']}",
         ]
         if stats["recent"]:
             lines.append("\n<b>Последние:</b>")
@@ -910,6 +912,127 @@ class Worker:
         if start < end:
             return start <= hour < end
         return hour >= start or hour < end
+
+    # --- авто-реакции на посты (прогрев) -------------------------------------
+    async def _reaction_loop(self) -> None:
+        """Ставит эмодзи на свежие сообщения в отслеживаемых чатах, по расписанию."""
+        while not self._stop.is_set():
+            interval = 120.0
+            try:
+                interval = await self._run_reaction_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — прогрев не критичнее работы
+                logger.warning("reaction_loop_failed", detail=str(exc)[:150])
+            await self._sleep(interval)
+
+    async def _run_reaction_tick(self) -> float:
+        import random
+        from datetime import timedelta
+
+        from app.core.clock import utcnow
+        from app.models.reaction_settings import SINGLETON_ID as REACT_ID
+        from app.models.reaction_settings import ReactionSettings
+        from app.telegram.reactions import react_to_message
+
+        async with self.runtime.database.session() as db:
+            row = await db.get(ReactionSettings, REACT_ID)
+        if row is None or not row.enabled:
+            return 60.0
+        if not self._within_work_hours():
+            return 300.0
+
+        redis = self.runtime.redis.client
+        offset = self.runtime.settings.work_hours_tz_offset
+        now_local = utcnow() + timedelta(hours=offset)
+        hour_key = f"react:acted:{now_local.strftime('%Y-%m-%d-%H')}"
+        if int(await redis.get(hour_key) or 0) >= max(1, row.per_hour):
+            return 120.0
+
+        attempts = 0
+        for account_id in list(self._clients.account_ids):
+            client = self._clients.get(account_id)
+            if client is None:
+                continue
+            for tg_chat_id, tg_message_id in await self._reaction_candidates(
+                account_id, row.fresh_window_hours
+            ):
+                # Не чаще одной реакции в чат за N минут.
+                chat_key = f"reactchat:{account_id}:{tg_chat_id}"
+                if await redis.get(chat_key):
+                    continue
+                # Одно сообщение — одна реакция (не переставляем).
+                msg_key = f"reactmsg:{account_id}:{tg_chat_id}:{tg_message_id}"
+                if not await redis.set(msg_key, "1", nx=True, ex=14 * 86400):
+                    continue
+                attempts += 1
+                emo = await react_to_message(client, tg_chat_id, tg_message_id)
+                if emo is None:
+                    if attempts >= 6:
+                        return 90.0
+                    continue
+                await redis.set(chat_key, "1", ex=max(1, row.per_chat_cooldown_minutes) * 60)
+                await redis.incr(hour_key)
+                await redis.expire(hour_key, 3700)
+                await self._record_react_stat()
+                logger.info(
+                    "post_reacted",
+                    account_id=str(account_id),
+                    tg_chat_id=tg_chat_id,
+                    msg=tg_message_id,
+                    emoji=emo,
+                )
+                return float(random.choices([90, 300, 900], weights=[5, 4, 2])[0])
+        return 120.0
+
+    async def _reaction_candidates(
+        self, account_id: uuid.UUID, window_hours: int
+    ) -> list[tuple[int, int]]:
+        """Свежие входящие сообщения в отслеживаемых группах (chat_tg_id, msg_id)."""
+        from datetime import timedelta
+
+        from sqlalchemy import select
+
+        from app.core.clock import utcnow
+        from app.models import Chat, ChatType, Message
+
+        since = utcnow() - timedelta(hours=max(1, window_hours))
+        group_types = [ChatType.GROUP, ChatType.SUPERGROUP]
+        own = self._self_guard.own_ids
+        async with self.runtime.database.session() as db:
+            rows = (
+                await db.execute(
+                    select(Message.tg_chat_id, Message.tg_message_id, Message.sender_tg_id)
+                    .join(Chat, Chat.id == Message.chat_id)
+                    .where(
+                        Message.account_id == account_id,
+                        Message.is_incoming.is_(True),
+                        Chat.monitored.is_(True),
+                        Chat.type.in_(group_types),
+                        Message.created_at >= since,
+                    )
+                    .order_by(Message.date.desc())
+                    .limit(200)
+                )
+            ).all()
+        out: list[tuple[int, int]] = []
+        for tg_chat_id, tg_message_id, sender in rows:
+            if sender is not None and int(sender) in own:
+                continue
+            out.append((int(tg_chat_id), int(tg_message_id)))
+        return out
+
+    async def _record_react_stat(self) -> None:
+        from datetime import timedelta
+
+        from app.core.clock import utcnow
+
+        redis = self.runtime.redis.client
+        offset = self.runtime.settings.work_hours_tz_offset
+        day = (utcnow() + timedelta(hours=offset)).strftime("%Y-%m-%d")
+        await redis.incr(f"react:{day}")
+        await redis.expire(f"react:{day}", 8 * 86400)
+        await redis.incr("react:total")
 
     async def _refresh_own_ids(self) -> None:
         """Обновляет реестр своих id (анти-самоответ) и стоп-лист."""

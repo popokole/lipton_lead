@@ -37,6 +37,8 @@ interface StoryStat {
   liked_today: number;
   viewed_total: number;
   liked_total: number;
+  reacted_today: number;
+  reacted_total: number;
   recent: { name: string; username: string | null; liked: boolean; at: string }[];
 }
 
@@ -228,12 +230,14 @@ export default function OverviewPage() {
         )}
       </Card>
 
-      <Card title="Истории — авто-просмотр (прогрев)" className="mt-6">
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <Card title="Прогрев — истории и реакции" className="mt-6">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
           <Stat label="Просмотрено сегодня" value={stories.data?.viewed_today ?? 0} />
           <Stat label="Лайков сегодня" value={stories.data?.liked_today ?? 0} />
+          <Stat label="Реакций на посты сегодня" value={stories.data?.reacted_today ?? 0} />
           <Stat label="Просмотрено всего" value={stories.data?.viewed_total ?? 0} />
           <Stat label="Лайков всего" value={stories.data?.liked_total ?? 0} />
+          <Stat label="Реакций всего" value={stories.data?.reacted_total ?? 0} />
         </div>
         {(stories.data?.recent?.length ?? 0) > 0 && (
           <ul className="mt-4 flex flex-wrap gap-2">
