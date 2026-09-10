@@ -779,7 +779,7 @@ class Worker:
                 ):
                     continue
                 attempts += 1
-                viewed, liked, name = await engage_user_stories(client, tg_user_id)
+                viewed, liked, name, username = await engage_user_stories(client, tg_user_id)
                 if viewed == 0:
                     # нет активных историй — лимит не тратим, но и не долбим API
                     if attempts >= 6:
@@ -787,7 +787,7 @@ class Worker:
                     continue
                 await redis.incr(hour_key)
                 await redis.expire(hour_key, 3700)
-                await self._record_story_stat(name, liked)
+                await self._record_story_stat(name, liked, username)
                 logger.info(
                     "story_viewed",
                     account_id=str(account_id),
@@ -799,7 +799,7 @@ class Worker:
                 return float(random.choices([60, 600, 1200], weights=[5, 5, 2])[0])
         return 120.0
 
-    async def _record_story_stat(self, name: str, liked: bool) -> None:
+    async def _record_story_stat(self, name: str, liked: bool, username: str | None) -> None:
         import json
         from datetime import timedelta
 
@@ -816,7 +816,13 @@ class Worker:
             await redis.expire(f"story:liked:{day}", 8 * 86400)
             await redis.incr("story:liked:total")
         entry = json.dumps(
-            {"name": name[:40], "liked": liked, "at": utcnow().isoformat()}, ensure_ascii=False
+            {
+                "name": name[:40],
+                "username": username,
+                "liked": liked,
+                "at": utcnow().isoformat(),
+            },
+            ensure_ascii=False,
         )
         await redis.lpush("story:recent", entry)
         await redis.ltrim("story:recent", 0, 29)
@@ -845,7 +851,9 @@ class Worker:
                     .replace("<", "&lt;")
                     .replace(">", "&gt;")
                 )
-                lines.append(f"{mark} {name}")
+                uname = item.get("username")
+                tag = f" @{uname}" if uname else ""
+                lines.append(f"{mark} {name}{tag}")
         if chat_id is not None:
             await self._notifier.send_stories_stats(token, int(chat_id), "\n".join(lines))
 

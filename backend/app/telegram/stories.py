@@ -55,38 +55,40 @@ def _display_name(entity: Any) -> str:
 
 async def engage_user_stories(
     client: Any, tg_user_id: int, *, like: bool = True
-) -> tuple[int, bool, str]:
+) -> tuple[int, bool, str, str | None]:
     """Смотрит (и лайкает) активные истории пользователя.
 
-    Возвращает (сколько историй просмотрено, поставлен ли лайк, отображаемое имя).
+    Возвращает (сколько просмотрено, поставлен ли лайк, имя, @username|None).
     """
     from telethon.tl import functions, types
 
     name = str(tg_user_id)
+    username: str | None = None
     try:
         entity = await client.get_entity(tg_user_id)
         name = _display_name(entity) or name
+        username = getattr(entity, "username", None)
     except Exception as exc:  # noqa: BLE001 — не резолвится (нет access_hash/приватность)
         logger.debug("story_entity_unresolved", tg_user_id=tg_user_id, detail=str(exc)[:120])
-        return 0, False, name
+        return 0, False, name, username
 
     try:
         peer = await client(functions.stories.GetPeerStoriesRequest(peer=entity))
     except Exception as exc:  # noqa: BLE001 — нет историй/приватность/rate limit
         logger.debug("story_fetch_failed", tg_user_id=tg_user_id, detail=str(exc)[:120])
-        return 0, False, name
+        return 0, False, name, username
 
     items = getattr(getattr(peer, "stories", None), "stories", None) or []
     ids = [item.id for item in items if isinstance(item, types.StoryItem)]
     if not ids:
-        return 0, False, name
+        return 0, False, name, username
 
     latest = max(ids)
     try:
         await client(functions.stories.ReadStoriesRequest(peer=entity, max_id=latest))
     except Exception as exc:  # noqa: BLE001 — просмотр не зачёлся
         logger.debug("story_read_failed", tg_user_id=tg_user_id, detail=str(exc)[:120])
-        return 0, False, name
+        return 0, False, name, username
 
     liked = False
     if like:
@@ -102,4 +104,4 @@ async def engage_user_stories(
         except Exception as exc:  # noqa: BLE001 — лайк не прошёл, просмотр всё равно есть
             logger.debug("story_like_failed", tg_user_id=tg_user_id, detail=str(exc)[:120])
 
-    return len(ids), liked, name
+    return len(ids), liked, name, username

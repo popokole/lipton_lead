@@ -37,7 +37,7 @@ interface StoryStat {
   liked_today: number;
   viewed_total: number;
   liked_total: number;
-  recent: { name: string; liked: boolean; at: string }[];
+  recent: { name: string; username: string | null; liked: boolean; at: string }[];
 }
 
 const EVENT_META: Record<string, { icon: ComponentType<{ size?: number }>; label: string }> = {
@@ -244,6 +244,7 @@ export default function OverviewPage() {
               >
                 <span>{item.liked ? '❤️' : '👁'}</span>
                 <span className="max-w-[140px] truncate">{item.name || '?'}</span>
+                {item.username && <span className="text-slate-500">@{item.username}</span>}
               </li>
             ))}
           </ul>
