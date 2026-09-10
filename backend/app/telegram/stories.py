@@ -53,7 +53,9 @@ def _display_name(entity: Any) -> str:
     return f"@{username}" if username else ""
 
 
-async def engage_user_stories(client: Any, tg_user_id: int, *, like: bool = True) -> tuple[int, bool, str]:
+async def engage_user_stories(
+    client: Any, tg_user_id: int, *, like: bool = True
+) -> tuple[int, bool, str]:
     """Смотрит (и лайкает) активные истории пользователя.
 
     Возвращает (сколько историй просмотрено, поставлен ли лайк, отображаемое имя).
