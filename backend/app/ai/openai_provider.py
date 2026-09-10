@@ -116,11 +116,16 @@ class OpenAIProvider:
             raw = getattr(exc, "raw_text", "").strip()
             if not raw:
                 raise
+            usage = getattr(exc, "usage", None) or Usage(model=request.model or "", latency_ms=0)
+            # Часть моделей (напр. deepseek) вместо JSON пишет ответ метками
+            # «group_text: … text: …». Не отправлять же это сырьём в чат —
+            # разбираем метки; иначе берём весь текст как обычный ответ.
+            labeled = _parse_labeled_reply(raw)
+            if labeled is not None:
+                logger.info("ai_generation_labeled_parsed", length=len(raw))
+                return AIResponse(result=labeled, usage=usage)
             logger.info("ai_generation_plain_text", length=len(raw))
-            return AIResponse(
-                result=GeneratedReply(text=raw),
-                usage=getattr(exc, "usage", None) or Usage(model=request.model or "", latency_ms=0),
-            )
+            return AIResponse(result=GeneratedReply(text=raw), usage=usage)
 
     async def summarize(self, request: SummarizeRequest) -> AIResponse[Summary]:
         return await self._structured(
@@ -265,6 +270,29 @@ def json_instruction(schema: type[BaseModel]) -> str:
         "Не добавляй других полей. Соблюдай типы: булевы поля — true/false, "
         "не текст. Переносы строк внутри значений экранируй как \\n."
     )
+
+
+_LABEL_RE = re.compile(r"(?im)^\s*(group_text|text)\s*:\s*")
+
+
+def _parse_labeled_reply(raw: str) -> GeneratedReply | None:
+    """Разбирает ответ в формате меток «group_text: … text: …».
+
+    Порядок меток любой. Обязательна метка text. Если меток нет — None (пусть
+    вызывающий возьмёт весь текст как обычный ответ).
+    """
+    labels = list(_LABEL_RE.finditer(raw))
+    if not labels:
+        return None
+    fields: dict[str, str] = {}
+    for i, match in enumerate(labels):
+        name = match.group(1).lower()
+        start = match.end()
+        end = labels[i + 1].start() if i + 1 < len(labels) else len(raw)
+        fields[name] = raw[start:end].strip()
+    if not fields.get("text"):
+        return None
+    return GeneratedReply(text=fields["text"], group_text=fields.get("group_text", ""))
 
 
 def parse_structured[T: BaseModel](content: str, schema: type[T]) -> T:
