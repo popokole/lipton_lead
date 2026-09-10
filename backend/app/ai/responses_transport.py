@@ -65,6 +65,13 @@ class ServiceBusyError(RetryableAIError):
     code = "ai_service_busy"
 
 
+class ModelUnavailableError(ServiceBusyError):
+    """Конкретная модель недоступна для аккаунта — надо СРАЗУ взять другую,
+    а не повторять ту же (повтор недоступной модели только тратит время)."""
+
+    code = "model_not_available"
+
+
 class TransportUnstableError(RetryableAIError):
     """Сеть до провайдера моргнула: таймаут, обрыв, отказ соединения."""
 
@@ -172,6 +179,10 @@ class ResponsesTransport:
                 if remaining <= 0:
                     break
                 return await self._request(payload, budget=remaining)
+            except ModelUnavailableError:
+                # Эту модель повторять бессмысленно — пусть complete() возьмёт
+                # следующую из цепочки. Пробрасываем без ретраев.
+                raise
             except RetryableAIError as exc:
                 last_error = exc
                 if attempt == self._max_attempts or time.monotonic() >= deadline:
@@ -261,6 +272,8 @@ def _failure_error(event: dict[str, Any]) -> AIError:
     code = str(error.get("code") or error.get("type") or "")
     message = str(error.get("message") or "AI provider reported a failure")
 
+    if code == "model_not_available":
+        return ModelUnavailableError(message)
     if code in RETRYABLE_CODES:
         return ServiceBusyError(message)
     return AIError(f"{code or 'error'}: {message}")
