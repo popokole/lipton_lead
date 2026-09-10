@@ -13,7 +13,9 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-LIKE_EMOJI = "❤️"
+# Telegram-лайк истории — красное сердце. Разные клиенты шлют его то с
+# вариацией U+FE0F, то без — пробуем оба и проверяем, что реакция применилась.
+LIKE_EMOJIS = ["❤", "❤️"]
 
 
 async def read_story_stats(redis: Any, tz_offset: int) -> dict[str, Any]:
@@ -92,16 +94,37 @@ async def engage_user_stories(
 
     liked = False
     if like:
-        try:
-            await client(
-                functions.stories.SendReactionRequest(
-                    peer=entity,
-                    story_id=latest,
-                    reaction=types.ReactionEmoji(emoticon=LIKE_EMOJI),
+        for emo in LIKE_EMOJIS:
+            try:
+                await client(
+                    functions.stories.SendReactionRequest(
+                        peer=entity,
+                        story_id=latest,
+                        reaction=types.ReactionEmoji(emoticon=emo),
+                        add_to_recent=True,
+                    )
                 )
-            )
-            liked = True
-        except Exception as exc:  # noqa: BLE001 — лайк не прошёл, просмотр всё равно есть
-            logger.debug("story_like_failed", tg_user_id=tg_user_id, detail=str(exc)[:120])
+            except Exception as exc:  # noqa: BLE001, PERF203 — этот вариант не подошёл
+                logger.debug("story_like_send_failed", detail=str(exc)[:120], emoji=emo)
+                continue
+            # Проверяем, что реакция реально применилась (иначе логировали бы
+            # ложное «поставлено»): перечитываем историю и смотрим sent_reaction.
+            if await _reaction_applied(client, functions, types, entity, latest):
+                liked = True
+                break
 
     return len(ids), liked, name, username
+
+
+async def _reaction_applied(
+    client: Any, functions: Any, types: Any, entity: Any, story_id: int
+) -> bool:
+    """True, если у истории story_id стоит наша реакция."""
+    try:
+        peer = await client(functions.stories.GetPeerStoriesRequest(peer=entity))
+    except Exception:  # noqa: BLE001 — не смогли проверить
+        return False
+    for item in getattr(getattr(peer, "stories", None), "stories", None) or []:
+        if isinstance(item, types.StoryItem) and item.id == story_id:
+            return getattr(item, "sent_reaction", None) is not None
+    return False
