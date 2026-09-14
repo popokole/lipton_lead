@@ -37,12 +37,7 @@ _CHECK_AI_KEYBOARD = {
 _START_MENU_KEYBOARD = {
     "inline_keyboard": [
         [{"text": "🔍 Проверить ИИ (codex.sale)", "callback_data": "check_ai"}],
-        [{"text": "📊 Истории (авто-просмотр)", "callback_data": "stories_stats"}],
     ]
-}
-
-_STORIES_KEYBOARD = {
-    "inline_keyboard": [[{"text": "🔄 Обновить", "callback_data": "stories_stats"}]]
 }
 
 
@@ -320,19 +315,6 @@ class NotifierBot:
                 chat_id=chat_id,
                 text="Бот-уведомитель Lipton Lead Gen.",
                 reply_markup=_START_MENU_KEYBOARD,
-            )
-
-    async def send_stories_stats(self, token: str, chat_id: int, text: str) -> None:
-        """Отправляет статистику авто-просмотра историй с кнопкой «Обновить»."""
-        with contextlib.suppress(Exception):
-            await self._call(
-                token,
-                "sendMessage",
-                chat_id=chat_id,
-                text=text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-                reply_markup=_STORIES_KEYBOARD,
             )
 
     async def edit_message(self, token: str, chat_id: int, message_id: int, text: str) -> None:

@@ -7,7 +7,6 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import APIRouter, Query
-from pydantic import BaseModel
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import InstrumentedAttribute
 
@@ -21,41 +20,24 @@ from app.models import (
     ActionType,
     AIRequest,
     Chat,
+    ChatType,
     EventLog,
     Lead,
     Message,
     Rule,
+    Scenario,
 )
 from app.schemas.resources import (
     DailyPoint,
     DashboardCounters,
     DashboardSeries,
     RuleStatOut,
+    ScenarioLeadStat,
     WorkerOut,
 )
 
 workers_router = APIRouter(prefix="/workers", tags=["workers"])
 analytics_router = APIRouter(prefix="/analytics", tags=["analytics"])
-
-
-class StoryStatOut(BaseModel):
-    viewed_today: int
-    liked_today: int
-    viewed_total: int
-    liked_total: int
-    reacted_today: int = 0
-    reacted_total: int = 0
-    recent: list[dict[str, Any]]
-
-
-@analytics_router.get(
-    "/stories", response_model=StoryStatOut, summary="Статистика авто-просмотра историй"
-)
-async def story_stats(_user: CurrentUser, runtime: RuntimeDep) -> StoryStatOut:
-    from app.telegram.stories import read_story_stats
-
-    data = await read_story_stats(runtime.redis.client, runtime.settings.work_hours_tz_offset)
-    return StoryStatOut(**data)
 
 
 @workers_router.get("", response_model=list[WorkerOut], summary="Живые воркеры")
@@ -95,6 +77,16 @@ async def dashboard(_user: CurrentUser, db: DbDep, runtime: RuntimeDep) -> Dashb
     chats_monitored = await count(
         select(func.count()).select_from(Chat).where(Chat.monitored.is_(True))
     )
+    groups_monitored = await count(
+        select(func.count())
+        .select_from(Chat)
+        .where(Chat.monitored.is_(True), Chat.type.in_([ChatType.GROUP, ChatType.SUPERGROUP]))
+    )
+    private_monitored = await count(
+        select(func.count())
+        .select_from(Chat)
+        .where(Chat.monitored.is_(True), Chat.type == ChatType.PRIVATE)
+    )
     messages_today = await count(
         select(func.count()).select_from(Message).where(Message.created_at >= since)
     )
@@ -118,6 +110,8 @@ async def dashboard(_user: CurrentUser, db: DbDep, runtime: RuntimeDep) -> Dashb
         accounts_total=accounts_total,
         accounts_online=accounts_online,
         chats_monitored=chats_monitored,
+        groups_monitored=groups_monitored,
+        private_monitored=private_monitored,
         messages_today=messages_today,
         ai_analyzed_today=ai_today,
         replies_today=replies_today,
@@ -203,3 +197,52 @@ async def rule_stats(_user: CurrentUser, db: DbDep) -> list[RuleStatOut]:
     ]
     stats.sort(key=lambda s: (s.replies, s.matches), reverse=True)
     return stats
+
+
+@analytics_router.get(
+    "/leads/by-scenario",
+    response_model=list[ScenarioLeadStat],
+    summary="Лиды по направлениям (сценариям)",
+)
+async def leads_by_scenario(
+    _user: CurrentUser, db: DbDep, days: int = Query(default=7, ge=1, le=90)
+) -> list[ScenarioLeadStat]:
+    """Для каждого направления (сценария), по которому есть лиды: ряд новых лидов
+    за `days` дней + суммарно за всё время. Лиды без сценария — «Без направления».
+    """
+    since = utcnow() - timedelta(days=days)
+
+    names = {row[0]: row[1] for row in (await db.execute(select(Scenario.id, Scenario.name))).all()}
+
+    totals = {
+        row[0]: int(row[1])
+        for row in (
+            await db.execute(select(Lead.scenario_id, func.count()).group_by(Lead.scenario_id))
+        ).all()
+    }
+
+    day = func.date_trunc("day", Lead.first_seen_at).label("day")
+    series: dict[Any, list[DailyPoint]] = {}
+    for scenario_id, d, cnt in (
+        await db.execute(
+            select(Lead.scenario_id, day, func.count())
+            .where(Lead.first_seen_at >= since)
+            .group_by(Lead.scenario_id, day)
+            .order_by(day)
+        )
+    ).all():
+        series.setdefault(scenario_id, []).append(
+            DailyPoint(day=d.date().isoformat(), value=int(cnt))
+        )
+
+    out = [
+        ScenarioLeadStat(
+            scenario_id=sid,
+            name=(names.get(sid) if sid is not None else None) or "Без направления",
+            total=total,
+            series=series.get(sid, []),
+        )
+        for sid, total in totals.items()
+    ]
+    out.sort(key=lambda s: s.total, reverse=True)
+    return out

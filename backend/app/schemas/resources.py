@@ -434,6 +434,8 @@ class DashboardCounters(BaseModel):
     accounts_total: int
     accounts_online: int
     chats_monitored: int
+    groups_monitored: int
+    private_monitored: int
     messages_today: int
     ai_analyzed_today: int
     replies_today: int
@@ -445,6 +447,15 @@ class DashboardCounters(BaseModel):
 class DailyPoint(BaseModel):
     day: str
     value: int
+
+
+class ScenarioLeadStat(BaseModel):
+    """Лиды по одному направлению (сценарию): ряд за окно + всего за всё время."""
+
+    scenario_id: uuid.UUID | None
+    name: str
+    total: int
+    series: list[DailyPoint]
 
 
 class DashboardSeries(BaseModel):

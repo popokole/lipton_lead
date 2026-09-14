@@ -270,6 +270,8 @@ export interface DashboardCounters {
   accounts_total: number;
   accounts_online: number;
   chats_monitored: number;
+  groups_monitored: number;
+  private_monitored: number;
   messages_today: number;
   ai_analyzed_today: number;
   replies_today: number;
@@ -281,6 +283,13 @@ export interface DashboardCounters {
 export interface DailyPoint {
   day: string;
   value: number;
+}
+
+export interface ScenarioLeadStat {
+  scenario_id: string | null;
+  name: string;
+  total: number;
+  series: DailyPoint[];
 }
 
 export interface DashboardSeries {
