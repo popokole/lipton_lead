@@ -289,6 +289,10 @@ export interface ScenarioLeadStat {
   scenario_id: string | null;
   name: string;
   total: number;
+  week: number;
+  today: number;
+  hot: number;
+  converted: number;
   series: DailyPoint[];
 }
 

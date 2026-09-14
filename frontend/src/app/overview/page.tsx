@@ -1,20 +1,86 @@
 'use client';
 
 import { Shell } from '@/components/shell';
-import {
-  BarChart,
-  Card,
-  Empty,
-  ErrorText,
-  PageHeader,
-  Stat,
-  StatusBadge,
-} from '@/components/ui';
+import { Card, Empty, ErrorText, PageHeader, Stat, StatusBadge } from '@/components/ui';
 import { useApi } from '@/lib/hooks';
-import type { DashboardCounters, ScenarioLeadStat } from '@/lib/types';
+import type { DailyPoint, DashboardCounters, ScenarioLeadStat } from '@/lib/types';
 
-function weekSum(series: { value: number }[]): number {
-  return series.reduce((acc, point) => acc + point.value, 0);
+const WEEKDAYS = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+
+interface Bar {
+  key: string;
+  label: string;
+  value: number;
+}
+
+/** Разворачивает разрежённый ряд в полные 7 дней (сегодня — крайний справа). */
+function lastSevenDays(series: DailyPoint[]): Bar[] {
+  const byDay = new Map(series.map((point) => [point.day, point.value]));
+  const bars: Bar[] = [];
+  const today = new Date();
+  for (let offset = 6; offset >= 0; offset -= 1) {
+    const date = new Date(today);
+    date.setDate(today.getDate() - offset);
+    const key = date.toISOString().slice(0, 10);
+    bars.push({ key, label: WEEKDAYS[date.getDay()], value: byDay.get(key) ?? 0 });
+  }
+  return bars;
+}
+
+function WeekChart({ series, color }: { series: DailyPoint[]; color: string }) {
+  const bars = lastSevenDays(series);
+  const max = Math.max(...bars.map((bar) => bar.value), 1);
+
+  return (
+    <div className="flex h-32 items-end gap-2">
+      {bars.map((bar) => (
+        <div key={bar.key} className="flex flex-1 flex-col items-center gap-1">
+          <span className="text-[11px] font-medium text-slate-400">{bar.value || ''}</span>
+          <div className="flex w-full flex-1 items-end">
+            <div
+              className="w-full rounded-t-md transition-all"
+              style={{
+                height: `${bar.value === 0 ? 3 : Math.max((bar.value / max) * 100, 8)}%`,
+                background:
+                  bar.value === 0
+                    ? 'rgba(148,163,184,.18)'
+                    : `linear-gradient(180deg, ${color}, ${color}44)`,
+              }}
+              title={`${bar.key}: ${bar.value}`}
+            />
+          </div>
+          <span className="text-[11px] text-slate-600">{bar.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Metric({ value, label, tone }: { value: number; label: string; tone?: string }) {
+  return (
+    <div>
+      <div className={`text-xl font-semibold ${tone ?? 'text-slate-100'}`}>{value}</div>
+      <div className="text-[11px] uppercase tracking-wide text-slate-500">{label}</div>
+    </div>
+  );
+}
+
+function DirectionCard({ stat }: { stat: ScenarioLeadStat }) {
+  const conversion = stat.total > 0 ? Math.round((stat.converted / stat.total) * 100) : 0;
+  return (
+    <Card
+      title={stat.name}
+      actions={stat.hot > 0 ? <StatusBadge tone="bad">🔥 {stat.hot}</StatusBadge> : null}
+    >
+      <div className="mb-4 grid grid-cols-4 gap-3">
+        <Metric value={stat.total} label="всего" />
+        <Metric value={stat.week} label="за 7 дней" tone="text-amber-400" />
+        <Metric value={stat.today} label="сегодня" tone="text-sky-400" />
+        <Metric value={stat.converted} label={`продаж · ${conversion}%`} tone="text-emerald-400" />
+      </div>
+      <WeekChart series={stat.series} color="#eab308" />
+    </Card>
+  );
 }
 
 export default function OverviewPage() {
@@ -68,23 +134,7 @@ export default function OverviewPage() {
         ) : (
           <div className="grid gap-4 lg:grid-cols-2">
             {directions.map((direction) => (
-              <Card key={direction.scenario_id ?? direction.name} title={direction.name}>
-                <div className="mb-4 flex items-end gap-6">
-                  <div>
-                    <div className="text-3xl font-semibold text-slate-100">{direction.total}</div>
-                    <div className="text-xs uppercase tracking-wide text-slate-500">
-                      лидов за всё время
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-2xl font-medium text-amber-400">
-                      +{weekSum(direction.series)}
-                    </div>
-                    <div className="text-xs uppercase tracking-wide text-slate-500">за неделю</div>
-                  </div>
-                </div>
-                <BarChart points={direction.series} color="#eab308" />
-              </Card>
+              <DirectionCard key={direction.scenario_id ?? direction.name} stat={direction} />
             ))}
           </div>
         )}

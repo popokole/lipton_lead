@@ -23,6 +23,7 @@ from app.models import (
     ChatType,
     EventLog,
     Lead,
+    LeadStatus,
     Message,
     Rule,
     Scenario,
@@ -211,13 +212,23 @@ async def leads_by_scenario(
     за `days` дней + суммарно за всё время. Лиды без сценария — «Без направления».
     """
     since = utcnow() - timedelta(days=days)
+    day_ago = utcnow() - timedelta(days=1)
 
     names = {row[0]: row[1] for row in (await db.execute(select(Scenario.id, Scenario.name))).all()}
 
-    totals = {
-        row[0]: int(row[1])
+    # Сводка за всё время: всего, горячие, сконвертированные, за сутки.
+    summary: dict[Any, tuple[int, int, int, int]] = {
+        row[0]: (int(row[1]), int(row[2]), int(row[3]), int(row[4]))
         for row in (
-            await db.execute(select(Lead.scenario_id, func.count()).group_by(Lead.scenario_id))
+            await db.execute(
+                select(
+                    Lead.scenario_id,
+                    func.count(),
+                    func.count().filter(Lead.status == LeadStatus.HOT),
+                    func.count().filter(Lead.status == LeadStatus.CONVERTED),
+                    func.count().filter(Lead.first_seen_at >= day_ago),
+                ).group_by(Lead.scenario_id)
+            )
         ).all()
     }
 
@@ -240,9 +251,13 @@ async def leads_by_scenario(
             scenario_id=sid,
             name=(names.get(sid) if sid is not None else None) or "Без направления",
             total=total,
+            week=sum(p.value for p in series.get(sid, [])),
+            today=today,
+            hot=hot,
+            converted=converted,
             series=series.get(sid, []),
         )
-        for sid, total in totals.items()
+        for sid, (total, hot, converted, today) in summary.items()
     ]
     out.sort(key=lambda s: s.total, reverse=True)
     return out

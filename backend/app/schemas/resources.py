@@ -450,11 +450,15 @@ class DailyPoint(BaseModel):
 
 
 class ScenarioLeadStat(BaseModel):
-    """Лиды по одному направлению (сценарию): ряд за окно + всего за всё время."""
+    """Лиды по одному направлению (сценарию): ряд за окно + сводка за всё время."""
 
     scenario_id: uuid.UUID | None
     name: str
     total: int
+    week: int
+    today: int
+    hot: int
+    converted: int
     series: list[DailyPoint]
 
 
