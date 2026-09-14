@@ -3,11 +3,11 @@
 import { Shell } from '@/components/shell';
 import { SectionTabs } from '@/components/section-tabs';
 
-import { ChatsView } from '../chats/page';
-import { ConversationsView } from '../conversations/page';
-import { InboxView } from '../inbox/page';
-import { MessagesView } from '../messages/page';
-import { TreeView } from '../tree/page';
+import { ChatsView } from '../chats/view';
+import { ConversationsView } from '../conversations/view';
+import { InboxView } from '../inbox/view';
+import { MessagesView } from '../messages/view';
+import { TreeView } from '../tree/view';
 
 export default function CommunicationPage() {
   return (

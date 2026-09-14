@@ -3,8 +3,8 @@
 import { Shell } from '@/components/shell';
 import { SectionTabs } from '@/components/section-tabs';
 
-import { HandoffView } from '../handoff/page';
-import { ReviewsView } from '../reviews/page';
+import { HandoffView } from '../handoff/view';
+import { ReviewsView } from '../reviews/view';
 
 export default function AttentionPage() {
   return (

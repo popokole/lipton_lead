@@ -3,10 +3,10 @@
 import { Shell } from '@/components/shell';
 import { SectionTabs } from '@/components/section-tabs';
 
-import { AccountsView } from '../accounts/page';
-import { LogsView } from '../logs/page';
-import { SettingsView } from '../settings/page';
-import { WorkersView } from '../workers/page';
+import { AccountsView } from '../accounts/view';
+import { LogsView } from '../logs/view';
+import { SettingsView } from '../settings/view';
+import { WorkersView } from '../workers/view';
 
 export default function SystemPage() {
   return (

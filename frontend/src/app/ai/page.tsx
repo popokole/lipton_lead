@@ -3,11 +3,11 @@
 import { Shell } from '@/components/shell';
 import { SectionTabs } from '@/components/section-tabs';
 
-import { AbTestView } from '../abtest/page';
-import { KnowledgeView } from '../knowledge/page';
-import { RulesView } from '../rules/page';
-import { ScenariosView } from '../scenarios/page';
-import { StoplistView } from '../stoplist/page';
+import { AbTestView } from '../abtest/view';
+import { KnowledgeView } from '../knowledge/view';
+import { RulesView } from '../rules/view';
+import { ScenariosView } from '../scenarios/view';
+import { StoplistView } from '../stoplist/view';
 
 export default function AiSettingsPage() {
   return (
