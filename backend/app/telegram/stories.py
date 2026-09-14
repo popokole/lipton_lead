@@ -1,8 +1,12 @@
-"""Просмотр и лайк историй (Stories) пользователя — прогрев.
+"""Просмотр историй (Stories) пользователя — мягкий прогрев.
 
-Помечаем активные истории человека просмотренными и ставим реакцию (❤️), чтобы
-наш аккаунт появился у него в зрителях и лайках. Всё делает воркер (владелец
-клиента). Любая ошибка — это ноль действий, а не падение: прогрев вторичен.
+Помечаем активные истории человека просмотренными, чтобы наш аккаунт появился
+у него в зрителях. Всё делает воркер (владелец клиента). Любая ошибка — это ноль
+действий, а не падение: прогрев вторичен.
+
+Авто-лайк историй убран намеренно: автоматические реакции с аккаунта —
+поведение, за которое Telegram замораживает аккаунт (инцидент 09.2026,
+«Фейк основа»). Прогрев теперь только просмотр, без каких-либо записей.
 """
 
 from __future__ import annotations
@@ -12,10 +16,6 @@ from typing import Any
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
-
-# Telegram-лайк истории — красное сердце. Разные клиенты шлют его то с
-# вариацией U+FE0F, то без — пробуем оба и проверяем, что реакция применилась.
-LIKE_EMOJIS = ["❤", "❤️"]
 
 
 async def read_story_stats(redis: Any, tz_offset: int) -> dict[str, Any]:
@@ -58,11 +58,11 @@ def _display_name(entity: Any) -> str:
 
 
 async def engage_user_stories(
-    client: Any, tg_user_id: int, *, like: bool = True
-) -> tuple[int, bool, str, str | None]:
-    """Смотрит (и лайкает) активные истории пользователя.
+    client: Any, tg_user_id: int
+) -> tuple[int, str, str | None]:
+    """Помечает активные истории пользователя просмотренными (без лайка).
 
-    Возвращает (сколько просмотрено, поставлен ли лайк, имя, @username|None).
+    Возвращает (сколько просмотрено, имя, @username|None).
     """
     from telethon.tl import functions, types
 
@@ -74,59 +74,26 @@ async def engage_user_stories(
         username = getattr(entity, "username", None)
     except Exception as exc:  # noqa: BLE001 — не резолвится (нет access_hash/приватность)
         logger.debug("story_entity_unresolved", tg_user_id=tg_user_id, detail=str(exc)[:120])
-        return 0, False, name, username
+        return 0, name, username
 
     try:
         peer = await client(functions.stories.GetPeerStoriesRequest(peer=entity))
     except Exception as exc:  # noqa: BLE001 — нет историй/приватность/rate limit
         logger.debug("story_fetch_failed", tg_user_id=tg_user_id, detail=str(exc)[:120])
-        return 0, False, name, username
+        return 0, name, username
 
     items = getattr(getattr(peer, "stories", None), "stories", None) or []
     ids = [item.id for item in items if isinstance(item, types.StoryItem)]
     if not ids:
-        return 0, False, name, username
+        return 0, name, username
 
     latest = max(ids)
     try:
         await client(functions.stories.ReadStoriesRequest(peer=entity, max_id=latest))
     except Exception as exc:  # noqa: BLE001 — просмотр не зачёлся
         logger.debug("story_read_failed", tg_user_id=tg_user_id, detail=str(exc)[:120])
-        return 0, False, name, username
+        return 0, name, username
 
-    liked = False
-    if like:
-        for emo in LIKE_EMOJIS:
-            try:
-                await client(
-                    functions.stories.SendReactionRequest(
-                        peer=entity,
-                        story_id=latest,
-                        reaction=types.ReactionEmoji(emoticon=emo),
-                        add_to_recent=True,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 — этот вариант реакции не подошёл
-                logger.debug("story_like_send_failed", detail=str(exc)[:120], emoji=emo)
-                continue
-            # Проверяем, что реакция реально применилась (иначе логировали бы
-            # ложное «поставлено»): перечитываем историю и смотрим sent_reaction.
-            if await _reaction_applied(client, functions, types, entity, latest):
-                liked = True
-                break
-
-    return len(ids), liked, name, username
+    return len(ids), name, username
 
 
-async def _reaction_applied(
-    client: Any, functions: Any, types: Any, entity: Any, story_id: int
-) -> bool:
-    """True, если у истории story_id стоит наша реакция."""
-    try:
-        peer = await client(functions.stories.GetPeerStoriesRequest(peer=entity))
-    except Exception:  # noqa: BLE001 — не смогли проверить
-        return False
-    for item in getattr(getattr(peer, "stories", None), "stories", None) or []:
-        if isinstance(item, types.StoryItem) and item.id == story_id:
-            return getattr(item, "sent_reaction", None) is not None
-    return False

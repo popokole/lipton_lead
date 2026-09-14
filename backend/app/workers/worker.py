@@ -780,7 +780,7 @@ class Worker:
                 ):
                     continue
                 attempts += 1
-                viewed, liked, name, username = await engage_user_stories(client, tg_user_id)
+                viewed, name, username = await engage_user_stories(client, tg_user_id)
                 if viewed == 0:
                     # нет активных историй — лимит не тратим, но и не долбим API
                     if attempts >= 6:
@@ -788,19 +788,18 @@ class Worker:
                     continue
                 await redis.incr(hour_key)
                 await redis.expire(hour_key, 3700)
-                await self._record_story_stat(name, liked, username)
+                await self._record_story_stat(name, username)
                 logger.info(
                     "story_viewed",
                     account_id=str(account_id),
                     tg_user_id=tg_user_id,
                     stories=viewed,
-                    liked=liked,
                 )
                 # Человекоподобно: чаще коротко (1м), иногда средне (10м) и редко долго (20м).
                 return float(random.choices([60, 600, 1200], weights=[5, 5, 2])[0])
         return 120.0
 
-    async def _record_story_stat(self, name: str, liked: bool, username: str | None) -> None:
+    async def _record_story_stat(self, name: str, username: str | None) -> None:
         import json
         from datetime import timedelta
 
@@ -812,15 +811,10 @@ class Worker:
         await redis.incr(f"story:viewed:{day}")
         await redis.expire(f"story:viewed:{day}", 8 * 86400)
         await redis.incr("story:viewed:total")
-        if liked:
-            await redis.incr(f"story:liked:{day}")
-            await redis.expire(f"story:liked:{day}", 8 * 86400)
-            await redis.incr("story:liked:total")
         entry = json.dumps(
             {
                 "name": name[:40],
                 "username": username,
-                "liked": liked,
                 "at": utcnow().isoformat(),
             },
             ensure_ascii=False,
@@ -840,13 +834,11 @@ class Worker:
         lines = [
             "📊 <b>Истории — авто-просмотр</b>",
             f"👁 просмотрено сегодня: {stats['viewed_today']} · всего: {stats['viewed_total']}",
-            f"❤️ лайков сегодня: {stats['liked_today']} · всего: {stats['liked_total']}",
-            f"👍 реакций сегодня: {stats['reacted_today']} · всего: {stats['reacted_total']}",
         ]
         if stats["recent"]:
             lines.append("\n<b>Последние:</b>")
             for item in stats["recent"][:10]:
-                mark = "❤️" if item.get("liked") else "👁"
+                mark = "👁"
                 name = (
                     str(item.get("name") or "?")
                     .replace("&", "&amp;")
