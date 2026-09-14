@@ -36,6 +36,7 @@ export function AccountsView() {
   const [authFor, setAuthFor] = useState<Account | null>(null);
   const [importFor, setImportFor] = useState<Account | null>(null);
   const [dialogsFor, setDialogsFor] = useState<Account | null>(null);
+  const [removing, setRemoving] = useState<string | null>(null);
 
   async function createAccount() {
     if (!label.trim()) return;
@@ -73,12 +74,17 @@ export function AccountsView() {
   }
 
   async function remove(account: Account) {
+    if (removing) return;
     if (!confirm(`Удалить аккаунт «${account.label}» вместе со всей его историей?`)) return;
+    setRemoving(account.id);
+    setError(null);
     try {
       await api.delete(`/accounts/${account.id}`);
       await accounts.reload();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setRemoving(null);
     }
   }
 
@@ -165,8 +171,12 @@ export function AccountsView() {
                     <Button variant="ghost" onClick={() => toggle(account)}>
                       {account.enabled ? 'Выключить' : 'Включить'}
                     </Button>
-                    <Button variant="danger" onClick={() => remove(account)}>
-                      Удалить
+                    <Button
+                      variant="danger"
+                      disabled={removing === account.id}
+                      onClick={() => remove(account)}
+                    >
+                      {removing === account.id ? 'Удаляем…' : 'Удалить'}
                     </Button>
                   </div>
                 </td>

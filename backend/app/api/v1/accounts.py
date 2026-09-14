@@ -121,10 +121,30 @@ async def update_account(
 
 
 @router.delete("/{account_id}", response_model=Ok, summary="Удалить аккаунт")
-async def delete_account(account_id: uuid.UUID, _admin: AdminUser, db: DbDep) -> Ok:
+async def delete_account(
+    account_id: uuid.UUID, _admin: AdminUser, bus: CommandBusDep, db: DbDep
+) -> Ok:
     await _load(db, account_id)
+
     # Каскад в базе унесёт сессию, чаты, сообщения и действия аккаунта.
     await db.execute(delete(Account).where(Account.id == account_id))
+
+    # Фиксируем удаление ДО обращения к воркеру. Порядок важен: если сначала
+    # отключить клиента, а потом удалить строку, воркер на ближайшем опросе
+    # (poll) увидит ещё живой аккаунт и переподхватит его — клиент осиротеет
+    # снова. С удалённой строкой list_serviceable его уже не вернёт.
+    await db.commit()
+
+    # Теперь снимаем аккаунт с воркера: останавливаем Telethon-клиент и
+    # отпускаем аренду в Redis. Без этого клиент забытого (в т.ч. забаненного)
+    # аккаунта продолжает висеть в воркере и долбить Telegram мёртвой сессией,
+    # а аренда продлевается вечно. Best-effort: воркер может быть недоступен
+    # или аккаунт не был подключён — это не должно мешать удалению.
+    with contextlib.suppress(AppError):
+        await bus.call(
+            Command(type=CommandType.DISCONNECT, account_id=account_id), timeout_seconds=20
+        )
+
     return Ok(detail="Аккаунт удалён")
 
 
