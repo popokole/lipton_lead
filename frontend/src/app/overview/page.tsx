@@ -1,5 +1,7 @@
 'use client';
 
+import Link from 'next/link';
+
 import {
   AlertTriangle,
   Bot,
@@ -151,19 +153,19 @@ export default function OverviewPage() {
             </div>
             <div className="flex flex-wrap gap-2">
               {handoffCount > 0 && (
-                <a href="/handoff">
+                <Link href="/handoff">
                   <Badge tone="warn">Открыть «Требует внимания»</Badge>
-                </a>
+                </Link>
               )}
               {reviewCount > 0 && (
-                <a href="/reviews">
+                <Link href="/reviews">
                   <Badge tone="info">Открыть «На подтверждение»</Badge>
-                </a>
+                </Link>
               )}
               {hotLeads > 0 && (
-                <a href="/leads">
+                <Link href="/leads">
                   <Badge tone="bad">Открыть «Лиды»</Badge>
-                </a>
+                </Link>
               )}
             </div>
           </div>

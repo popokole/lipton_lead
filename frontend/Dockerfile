@@ -18,6 +18,10 @@ CMD ["npm", "run", "dev"]
 
 
 FROM deps AS build
+# Подпуть развёртывания (напр. /tgaihelper). NEXT_PUBLIC_* инлайнится в клиент
+# на этапе сборки, поэтому значение нужно именно здесь, до `npm run build`.
+ARG NEXT_PUBLIC_BASE_PATH=""
+ENV NEXT_PUBLIC_BASE_PATH=$NEXT_PUBLIC_BASE_PATH
 COPY . .
 RUN npm run build
 

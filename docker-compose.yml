@@ -99,12 +99,20 @@ services:
     build:
       context: ./frontend
       target: runtime
+      args:
+        # Панель отдаётся под общим доменом на подпути liptonone.online/tgaihelper.
+        NEXT_PUBLIC_BASE_PATH: /tgaihelper
     restart: unless-stopped
+    # Next standalone слушает адрес из HOSTNAME; в Docker сюда попадает id
+    # контейнера, и сервер бьётся только по нему — из-за этого healthcheck по
+    # 127.0.0.1 не мог достучаться и autoheal крутил контейнер по кругу.
+    environment:
+      HOSTNAME: "0.0.0.0"
     expose:
       - "3000"
     # Next иногда «повисает» (процесс жив, но не отвечает) — healthcheck это
     # ловит, а autoheal перезапускает контейнер. fetch есть в Node 18+, лишних
-    # утилит не требует.
+    # утилит не требует. Путь с учётом basePath: без префикса страница даёт 404.
     labels:
       - autoheal=true
     healthcheck:
@@ -112,7 +120,7 @@ services:
         - CMD
         - node
         - -e
-        - "fetch('http://localhost:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        - "fetch('http://127.0.0.1:3000/tgaihelper/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
       interval: 30s
       timeout: 10s
       retries: 3

@@ -1,5 +1,7 @@
 'use client';
 
+import Link from 'next/link';
+
 import { Filter, Search, Target } from 'lucide-react';
 import { useMemo, useRef, useState } from 'react';
 
@@ -217,9 +219,9 @@ export default function TreePage() {
                 : 'Сообщения читаются, но правила не запускаются — ответов не будет.'}
             </p>
             <div className="mt-4 flex justify-end">
-              <a href="/inbox">
+              <Link href="/inbox">
                 <Button variant="ghost">Открыть в «Общении»</Button>
-              </a>
+              </Link>
             </div>
           </div>
         </div>

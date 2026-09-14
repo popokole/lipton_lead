@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { ApiError, api, tokens } from './api';
+import { ApiError, BASE_PATH, api, tokens } from './api';
 import type { RealtimeEvent } from './types';
 
 /** Загрузка данных с ручным обновлением и опциональным опросом. */
@@ -54,7 +54,7 @@ export function useRealtime(limit = 100) {
 
       const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
       const socket = new WebSocket(
-        `${scheme}://${window.location.host}/ws?token=${encodeURIComponent(token)}`,
+        `${scheme}://${window.location.host}${BASE_PATH}/ws?token=${encodeURIComponent(token)}`,
       );
       socketRef.current = socket;
 

@@ -6,7 +6,15 @@
  * Запросы идут по относительным путям: браузер обращается к nginx, а тот
  * проксирует `/api` в бэкенд. Так нет ни CORS, ни зашитого в сборку адреса
  * сервера — один и тот же образ работает и локально, и на VPS.
+ *
+ * BASE_PATH — подпуть развёртывания (напр. "/tgaihelper" за общим доменом).
+ * Совпадает с basePath из next.config.mjs (та же build-переменная), чтобы
+ * запросы к API и WebSocket шли под тем же префиксом, что и ассеты/страницы.
  */
+
+// Пусто в корне (локальная разработка), "/tgaihelper" — за общим доменом.
+export const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH || '';
+const API = `${BASE_PATH}/api`;
 
 const ACCESS_KEY = 'tgai.access';
 const REFRESH_KEY = 'tgai.refresh';
@@ -38,7 +46,7 @@ async function refreshTokens(): Promise<boolean> {
   const refresh = tokens.refresh();
   if (!refresh) return false;
 
-  const response = await fetch('/api/auth/refresh', {
+  const response = await fetch(`${API}/auth/refresh`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refresh_token: refresh }),
@@ -52,7 +60,7 @@ async function refreshTokens(): Promise<boolean> {
 
 async function send<T>(path: string, init: RequestInit, retry = true): Promise<T> {
   const access = tokens.access();
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(`${API}${path}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
@@ -69,8 +77,8 @@ async function send<T>(path: string, init: RequestInit, retry = true): Promise<T
 
   if (response.status === 401) {
     tokens.clear();
-    if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
-      window.location.href = '/login';
+    if (typeof window !== 'undefined' && !window.location.pathname.startsWith(`${BASE_PATH}/login`)) {
+      window.location.href = `${BASE_PATH}/login`;
     }
     throw new ApiError('Требуется вход', 401);
   }
@@ -95,7 +103,7 @@ async function send<T>(path: string, init: RequestInit, retry = true): Promise<T
 /** Загрузка файлов: Content-Type проставляет браузер вместе с boundary. */
 async function sendForm<T>(path: string, form: FormData, retry = true): Promise<T> {
   const access = tokens.access();
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(`${API}${path}`, {
     method: 'POST',
     body: form,
     headers: access ? { Authorization: `Bearer ${access}` } : {},
@@ -132,7 +140,7 @@ export const api = {
 };
 
 export async function login(email: string, password: string): Promise<void> {
-  const response = await fetch('/api/auth/login', {
+  const response = await fetch(`${API}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
@@ -147,5 +155,5 @@ export async function login(email: string, password: string): Promise<void> {
 
 export function logout(): void {
   tokens.clear();
-  window.location.href = '/login';
+  window.location.href = `${BASE_PATH}/login`;
 }
