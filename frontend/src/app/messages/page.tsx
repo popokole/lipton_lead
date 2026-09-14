@@ -20,7 +20,7 @@ import type { ActionRow, Message, Page } from '@/lib/types';
 
 const PAGE = 50;
 
-export default function MessagesPage() {
+export function MessagesView() {
   const [search, setSearch] = useState('');
   const [matchedOnly, setMatchedOnly] = useState(false);
   const [offset, setOffset] = useState(0);
@@ -45,7 +45,7 @@ export default function MessagesPage() {
   };
 
   return (
-    <Shell>
+    <>
       <PageHeader
         title="Сообщения"
         subtitle="Сохраняются сообщения отслеживаемых чатов и личных диалогов"
@@ -194,6 +194,14 @@ export default function MessagesPage() {
           )}
         </Card>
       </div>
+    </>
+  );
+}
+
+export default function MessagesPage() {
+  return (
+    <Shell>
+      <MessagesView />
     </Shell>
   );
 }

@@ -22,7 +22,7 @@ const SAMPLE_PROMPT =
   'Ты менеджер студии дизайна. Отвечай коротко, по делу и дружелюбно. ' +
   'Уточни задачу и предложи созвон. Не называй цены и сроки, которых нет в контексте.';
 
-export default function ScenariosPage() {
+export function ScenariosView() {
   const scenarios = useApi<Scenario[]>('/scenarios', 15_000);
   const [name, setName] = useState('');
   const [prompt, setPrompt] = useState(SAMPLE_PROMPT);
@@ -121,7 +121,7 @@ export default function ScenariosPage() {
   }
 
   return (
-    <Shell>
+    <>
       <PageHeader title="Сценарии" subtitle="Как именно AI формулирует ответ" />
       <ErrorText>{error ?? scenarios.error}</ErrorText>
 
@@ -312,6 +312,14 @@ export default function ScenariosPage() {
           </Table>
         )}
       </Card>
+    </>
+  );
+}
+
+export default function ScenariosPage() {
+  return (
+    <Shell>
+      <ScenariosView />
     </Shell>
   );
 }

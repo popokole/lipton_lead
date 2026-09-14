@@ -24,7 +24,7 @@ const TYPES = [
 
 const PAGE = 150;
 
-export default function LogsPage() {
+export function LogsView() {
   const [eventType, setEventType] = useState('');
   const [offset, setOffset] = useState(0);
   const logs = useApi<Page<LogRow>>(
@@ -40,7 +40,7 @@ export default function LogsPage() {
   };
 
   return (
-    <Shell>
+    <>
       <PageHeader title="Журнал" subtitle="Путь каждого сообщения через конвейер" />
       <ErrorText>{logs.error}</ErrorText>
 
@@ -118,6 +118,14 @@ export default function LogsPage() {
           </Table>
         )}
       </Card>
+    </>
+  );
+}
+
+export default function LogsPage() {
+  return (
+    <Shell>
+      <LogsView />
     </Shell>
   );
 }

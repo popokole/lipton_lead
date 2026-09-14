@@ -27,7 +27,7 @@ const ACTIONS: ActionType[] = [
   'IGNORE',
 ];
 
-export default function RulesPage() {
+export function RulesView() {
   const rules = useApi<Rule[]>('/rules', 15_000);
   const scenarios = useApi<Scenario[]>('/scenarios');
   const accounts = useApi<Account[]>('/accounts');
@@ -111,7 +111,7 @@ export default function RulesPage() {
   }
 
   return (
-    <Shell>
+    <>
       <PageHeader
         title="Правила"
         subtitle="Проверяются по убыванию приоритета, первое сработавшее останавливает подбор"
@@ -307,6 +307,14 @@ export default function RulesPage() {
           </Table>
         )}
       </Card>
+    </>
+  );
+}
+
+export default function RulesPage() {
+  return (
+    <Shell>
+      <RulesView />
     </Shell>
   );
 }

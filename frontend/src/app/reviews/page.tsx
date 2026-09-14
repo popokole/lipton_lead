@@ -17,7 +17,7 @@ interface Review {
   created_at: string;
 }
 
-export default function ReviewsPage() {
+export function ReviewsView() {
   const reviews = useApi<Review[]>('/reviews', 6_000);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -65,7 +65,7 @@ export default function ReviewsPage() {
   }
 
   return (
-    <Shell>
+    <>
       <PageHeader
         title="На подтверждение"
         subtitle="Сомнительные ответы ИИ: поправьте текст и отправьте, либо пропустите"
@@ -109,6 +109,14 @@ export default function ReviewsPage() {
           ))}
         </div>
       )}
+    </>
+  );
+}
+
+export default function ReviewsPage() {
+  return (
+    <Shell>
+      <ReviewsView />
     </Shell>
   );
 }

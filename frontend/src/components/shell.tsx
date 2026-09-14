@@ -1,20 +1,14 @@
 'use client';
 
 import {
-  BookOpen,
-  Bot,
   ChevronDown,
-  FlaskConical,
   Home,
   LayoutGrid,
-  ListChecks,
   MessageSquare,
   Server,
-  Settings,
   ShieldAlert,
   Sparkles,
   Target,
-  Users,
 } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
@@ -36,49 +30,15 @@ interface NavGroup {
   items: NavItem[];
 }
 
+// Плоский сайдбар: каждый раздел — одна страница, под-разделы внутри неё
+// горизонтальными вкладками (см. app/<section>/page.tsx + SectionTabs).
 const NAV: NavGroup[] = [
   { section: 'Обзор', icon: LayoutGrid, items: [{ href: '/overview', label: 'Обзор', icon: LayoutGrid }] },
-  {
-    section: 'Общение',
-    icon: MessageSquare,
-    items: [
-      { href: '/inbox', label: 'Общение', icon: MessageSquare },
-      { href: '/chats', label: 'Чаты', icon: MessageSquare },
-      { href: '/conversations', label: 'Диалоги', icon: MessageSquare },
-      { href: '/tree', label: 'Активность чатов', icon: MessageSquare },
-      { href: '/messages', label: 'Сообщения', icon: MessageSquare },
-    ],
-  },
-  {
-    section: 'Внимания требует',
-    icon: ShieldAlert,
-    items: [
-      { href: '/handoff', label: 'Требует внимания', icon: ShieldAlert },
-      { href: '/reviews', label: 'На подтверждение', icon: ListChecks },
-    ],
-  },
-  {
-    section: 'Настройка ИИ',
-    icon: Sparkles,
-    items: [
-      { href: '/scenarios', label: 'Сценарии', icon: Sparkles },
-      { href: '/rules', label: 'Правила', icon: Bot },
-      { href: '/knowledge', label: 'База знаний', icon: BookOpen },
-      { href: '/abtest', label: 'A/B заходов', icon: FlaskConical },
-      { href: '/stoplist', label: 'Стоп-лист', icon: ShieldAlert },
-    ],
-  },
+  { section: 'Общение', icon: MessageSquare, items: [{ href: '/communication', label: 'Общение', icon: MessageSquare }] },
   { section: 'Лиды', icon: Target, items: [{ href: '/leads', label: 'Лиды', icon: Target }] },
-  {
-    section: 'Система',
-    icon: Server,
-    items: [
-      { href: '/accounts', label: 'Аккаунты', icon: Users },
-      { href: '/workers', label: 'Воркеры', icon: Server },
-      { href: '/logs', label: 'Журнал', icon: ListChecks },
-      { href: '/settings', label: 'Настройки', icon: Settings },
-    ],
-  },
+  { section: 'Внимание', icon: ShieldAlert, items: [{ href: '/attention', label: 'Внимание', icon: ShieldAlert }] },
+  { section: 'Настройка ИИ', icon: Sparkles, items: [{ href: '/ai', label: 'Настройка ИИ', icon: Sparkles }] },
+  { section: 'Система', icon: Server, items: [{ href: '/system', label: 'Система', icon: Server }] },
 ];
 
 function activeGroupSection(pathname: string): string | null {

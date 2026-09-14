@@ -40,7 +40,7 @@ function chatName(chat: ChatNode): string {
   return chat.title ?? (chat.username ? `@${chat.username}` : String(chat.tg_chat_id));
 }
 
-export default function TreePage() {
+export function TreeView() {
   const tree = useApi<ChatTreeAccount[]>('/chats/tree', 12_000);
   const [selected, setSelected] = useState<{ account: string; chat: ChatNode } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -77,7 +77,7 @@ export default function TreePage() {
   }
 
   return (
-    <Shell>
+    <>
       <PageHeader
         title="Активность чатов"
         subtitle="Все чаты аккаунта — по лидам и активности. Ищите, фильтруйте, включайте слежку"
@@ -226,7 +226,7 @@ export default function TreePage() {
           </div>
         </div>
       )}
-    </Shell>
+    </>
   );
 }
 
@@ -582,4 +582,12 @@ function toggleClass(active: boolean, tone: 'ok' | 'info'): string {
   return `inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
     active ? on : 'border-ink-600 text-slate-400 hover:bg-ink-800'
   }`;
+}
+
+export default function TreePage() {
+  return (
+    <Shell>
+      <TreeView />
+    </Shell>
+  );
 }

@@ -15,7 +15,7 @@ interface StopEntry {
   created_at: string;
 }
 
-export default function StoplistPage() {
+export function StoplistView() {
   const entries = useApi<StopEntry[]>('/stoplist', 15_000);
   const [ident, setIdent] = useState('');
   const [note, setNote] = useState('');
@@ -55,7 +55,7 @@ export default function StoplistPage() {
   }
 
   return (
-    <Shell>
+    <>
       <PageHeader
         title="Стоп-лист"
         subtitle="Кому никогда не отвечаем: админы, конкуренты, боты, спамеры. Сообщения сохраняются, но ответы не идут"
@@ -113,6 +113,14 @@ export default function StoplistPage() {
           </Table>
         )}
       </Card>
+    </>
+  );
+}
+
+export default function StoplistPage() {
+  return (
+    <Shell>
+      <StoplistView />
     </Shell>
   );
 }

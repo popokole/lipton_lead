@@ -14,7 +14,7 @@ interface NotifyStatus {
   last_error: string | null;
 }
 
-export default function SettingsPage() {
+export function SettingsView() {
   const [status, setStatus] = useState<NotifyStatus | null>(null);
   const [token, setToken] = useState('');
   const [groupId, setGroupId] = useState('');
@@ -85,7 +85,7 @@ export default function SettingsPage() {
   }
 
   return (
-    <Shell>
+    <>
       <PageHeader title="Настройки" subtitle="Бот-уведомления: отчёты о лидах в форум-группу по топикам" />
       <ErrorText>{error}</ErrorText>
       {msg && (
@@ -178,7 +178,7 @@ export default function SettingsPage() {
       </Card>
 
       <PersonaCard />
-    </Shell>
+    </>
   );
 }
 
@@ -328,5 +328,13 @@ function PersonaCard() {
         </div>
       </div>
     </Card>
+  );
+}
+
+export default function SettingsPage() {
+  return (
+    <Shell>
+      <SettingsView />
+    </Shell>
   );
 }

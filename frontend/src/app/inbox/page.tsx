@@ -33,7 +33,7 @@ function threadName(thread: Thread): string {
  * чату, а не к человеку. Справа — переписка выбранного чата и ручной ответ от
  * имени аккаунта.
  */
-export default function InboxPage() {
+export function InboxView() {
   const [kind, setKind] = useState<Kind>('dm');
   const threads = useApi<Thread[]>(`/conversations/threads?kind=${kind}&limit=300`, 8_000);
   const [selected, setSelected] = useState<string | null>(null);
@@ -57,7 +57,7 @@ export default function InboxPage() {
   const active = threads.data?.find((thread) => thread.chat_id === selected) ?? null;
 
   return (
-    <Shell>
+    <>
       <PageHeader
         title="Общение"
         subtitle="Личные диалоги и группы — раздельно. Переписка и ручной ответ от имени аккаунта"
@@ -142,7 +142,7 @@ export default function InboxPage() {
           </div>
         )}
       </div>
-    </Shell>
+    </>
   );
 }
 
@@ -351,5 +351,13 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
         </div>
       </div>
     </div>
+  );
+}
+
+export default function InboxPage() {
+  return (
+    <Shell>
+      <InboxView />
+    </Shell>
   );
 }

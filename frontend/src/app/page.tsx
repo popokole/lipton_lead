@@ -37,7 +37,7 @@ const TILES: TileDef[] = [
     color: '#3b82f6',
   },
   {
-    href: '/inbox',
+    href: '/communication',
     label: 'Общение',
     description: 'Личка и группы, ручные ответы',
     icon: MessageSquare,
@@ -46,7 +46,7 @@ const TILES: TileDef[] = [
     color: '#22c55e',
   },
   {
-    href: '/handoff',
+    href: '/attention',
     label: 'Внимания требует',
     description: 'Эскалации и подтверждения',
     icon: ShieldAlert,
@@ -55,7 +55,7 @@ const TILES: TileDef[] = [
     color: '#ef4444',
   },
   {
-    href: '/scenarios',
+    href: '/ai',
     label: 'Настройка ИИ',
     description: 'Сценарии, правила, база знаний',
     icon: Sparkles,
@@ -73,7 +73,7 @@ const TILES: TileDef[] = [
     color: '#3b82f6',
   },
   {
-    href: '/accounts',
+    href: '/system',
     label: 'Система',
     description: 'Аккаунты, воркеры, журнал',
     icon: Bot,

@@ -8,7 +8,7 @@ import { ApiError, api } from '@/lib/api';
 import { useApi, useRealtime } from '@/lib/hooks';
 import type { Escalation } from '@/lib/types';
 
-export default function HandoffPage() {
+export function HandoffView() {
   const escalations = useApi<Escalation[]>('/handoff', 20_000);
   const { events } = useRealtime(10);
   const [resolving, setResolving] = useState<string | null>(null);
@@ -39,7 +39,7 @@ export default function HandoffPage() {
   const items = escalations.data ?? [];
 
   return (
-    <Shell>
+    <>
       <PageHeader
         title="Требует внимания"
         subtitle="Диалоги, переданные оператору: ИИ попросил помощи, отказался отвечать или не прошёл проверку"
@@ -115,6 +115,14 @@ export default function HandoffPage() {
           ))}
         </div>
       )}
+    </>
+  );
+}
+
+export default function HandoffPage() {
+  return (
+    <Shell>
+      <HandoffView />
     </Shell>
   );
 }

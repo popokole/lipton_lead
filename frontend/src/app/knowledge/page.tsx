@@ -23,7 +23,7 @@ interface Doc {
   created_at: string;
 }
 
-export default function KnowledgePage() {
+export function KnowledgeView() {
   const bases = useApi<Kb[]>('/knowledge', 20_000);
   const [name, setName] = useState('');
   const [selected, setSelected] = useState<string>('');
@@ -114,7 +114,7 @@ export default function KnowledgePage() {
   }
 
   return (
-    <Shell>
+    <>
       <PageHeader
         title="База знаний"
         subtitle="Материалы, по которым ИИ отвечает точно: цены, услуги, FAQ. Привяжите базу к сценарию в разделе «Сценарии»"
@@ -238,6 +238,14 @@ export default function KnowledgePage() {
           )}
         </div>
       </div>
+    </>
+  );
+}
+
+export default function KnowledgePage() {
+  return (
+    <Shell>
+      <KnowledgeView />
     </Shell>
   );
 }

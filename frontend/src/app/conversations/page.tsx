@@ -5,11 +5,11 @@ import { Badge, Card, Empty, ErrorText, PageHeader, Table, statusTone } from '@/
 import { useApi } from '@/lib/hooks';
 import type { Conversation } from '@/lib/types';
 
-export default function ConversationsPage() {
+export function ConversationsView() {
   const conversations = useApi<Conversation[]>('/conversations?limit=100', 10_000);
 
   return (
-    <Shell>
+    <>
       <PageHeader
         title="Диалоги"
         subtitle="Статус HUMAN_REQUIRED означает, что диалог ждёт оператора"
@@ -42,6 +42,14 @@ export default function ConversationsPage() {
           </Table>
         )}
       </Card>
+    </>
+  );
+}
+
+export default function ConversationsPage() {
+  return (
+    <Shell>
+      <ConversationsView />
     </Shell>
   );
 }

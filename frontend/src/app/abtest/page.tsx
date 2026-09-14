@@ -19,7 +19,7 @@ interface AbVariant {
   created_at: string;
 }
 
-export default function AbTestPage() {
+export function AbTestView() {
   const scenarios = useApi<Scenario[]>('/scenarios', 30_000);
   const [scenarioId, setScenarioId] = useState<string>('');
   const [variants, setVariants] = useState<AbVariant[]>([]);
@@ -86,7 +86,7 @@ export default function AbTestPage() {
     .sort((a, b) => b.reply_rate - a.reply_rate)[0];
 
   return (
-    <Shell>
+    <>
       <PageHeader
         title="A/B заходов"
         subtitle="Варианты первого сообщения новому лиду. Платформа шлёт их по очереди и считает, какой чаще получает ответ"
@@ -163,6 +163,14 @@ export default function AbTestPage() {
           </Table>
         )}
       </Card>
+    </>
+  );
+}
+
+export default function AbTestPage() {
+  return (
+    <Shell>
+      <AbTestView />
     </Shell>
   );
 }

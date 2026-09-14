@@ -5,11 +5,11 @@ import { Badge, Card, Empty, ErrorText, PageHeader, Table, statusTone } from '@/
 import { useApi } from '@/lib/hooks';
 import type { Worker } from '@/lib/types';
 
-export default function WorkersPage() {
+export function WorkersView() {
   const workers = useApi<Worker[]>('/workers', 5000);
 
   return (
-    <Shell>
+    <>
       <PageHeader
         title="Воркеры"
         subtitle="Список берётся из пульса в Redis: пропавший воркер исчезает сам"
@@ -43,6 +43,14 @@ export default function WorkersPage() {
           </Table>
         )}
       </Card>
+    </>
+  );
+}
+
+export default function WorkersPage() {
+  return (
+    <Shell>
+      <WorkersView />
     </Shell>
   );
 }

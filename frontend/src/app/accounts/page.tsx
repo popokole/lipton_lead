@@ -28,7 +28,7 @@ interface AuthResult {
   detail: string | null;
 }
 
-export default function AccountsPage() {
+export function AccountsView() {
   const accounts = useApi<Account[]>('/accounts', 5000);
   const proxies = useApi<Proxy[]>('/proxies');
   const [label, setLabel] = useState('');
@@ -84,7 +84,7 @@ export default function AccountsPage() {
   }
 
   return (
-    <Shell>
+    <>
       <PageHeader title="Аккаунты" subtitle="Telegram-аккаунты, которыми управляет система" />
       <ErrorText>{error ?? accounts.error}</ErrorText>
 
@@ -198,7 +198,7 @@ export default function AccountsPage() {
       )}
 
       {dialogsFor && <DialogPicker account={dialogsFor} onClose={() => setDialogsFor(null)} />}
-    </Shell>
+    </>
   );
 }
 
@@ -645,5 +645,13 @@ function ProxyCard({
         </ul>
       )}
     </Card>
+  );
+}
+
+export default function AccountsPage() {
+  return (
+    <Shell>
+      <AccountsView />
+    </Shell>
   );
 }

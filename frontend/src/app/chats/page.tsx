@@ -18,7 +18,7 @@ import { ApiError, api } from '@/lib/api';
 import { useApi } from '@/lib/hooks';
 import type { Account, Chat } from '@/lib/types';
 
-export default function ChatsPage() {
+export function ChatsView() {
   const chats = useApi<Chat[]>('/chats', 10_000);
   const accounts = useApi<Account[]>('/accounts');
   const [error, setError] = useState<string | null>(null);
@@ -72,7 +72,7 @@ export default function ChatsPage() {
   }
 
   return (
-    <Shell>
+    <>
       <PageHeader
         title="Чаты"
         subtitle="Обрабатываются только чаты с включённым наблюдением"
@@ -165,6 +165,14 @@ export default function ChatsPage() {
           </Table>
         )}
       </Card>
+    </>
+  );
+}
+
+export default function ChatsPage() {
+  return (
+    <Shell>
+      <ChatsView />
     </Shell>
   );
 }
