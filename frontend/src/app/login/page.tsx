@@ -35,15 +35,13 @@ export default function LoginPage() {
       >
         <div>
           <h1 className="text-lg font-semibold text-slate-100">Вход в панель</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            Учётные данные из ADMIN_EMAIL и ADMIN_PASSWORD в .env
-          </p>
+          <p className="mt-1 text-sm text-slate-500">Логин и пароль администратора</p>
         </div>
 
-        <Field label="Email">
+        <Field label="Логин">
           <input
             className={inputClass}
-            type="email"
+            type="text"
             autoComplete="username"
             value={email}
             onChange={(event) => setEmail(event.target.value)}
