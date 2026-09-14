@@ -1,11 +1,16 @@
 'use client';
 
+import { useId } from 'react';
+
 import { Shell } from '@/components/shell';
 import { Card, Empty, ErrorText, PageHeader, Stat, StatusBadge } from '@/components/ui';
 import { useApi } from '@/lib/hooks';
 import type { DailyPoint, DashboardCounters, ScenarioLeadStat } from '@/lib/types';
 
 const WEEKDAYS = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+
+// Палитра направлений: каждому свой цвет, чтобы графики различались.
+const PALETTE = ['#f59e0b', '#38bdf8', '#34d399', '#a78bfa', '#f472b6', '#fb7185'];
 
 interface Bar {
   key: string;
@@ -27,31 +32,65 @@ function lastSevenDays(series: DailyPoint[]): Bar[] {
   return bars;
 }
 
-function WeekChart({ series, color }: { series: DailyPoint[]; color: string }) {
+/** Адаптивный area-график на inline-SVG (gradient fill + линия + точки).
+ *  SVG вместо CSS-высот: проценты внутри flex не резолвятся, а SVG надёжен. */
+function WeekAreaChart({ series, color }: { series: DailyPoint[]; color: string }) {
+  const gradientId = useId();
   const bars = lastSevenDays(series);
+  const n = bars.length;
+  const W = 320;
+  const H = 110;
+  const padTop = 14;
+  const padBottom = 6;
   const max = Math.max(...bars.map((bar) => bar.value), 1);
 
+  const cx = (i: number) => ((i + 0.5) / n) * W;
+  const cy = (value: number) => H - padBottom - (value / max) * (H - padTop - padBottom);
+
+  const linePoints = bars.map((bar, i) => `${cx(i)},${cy(bar.value)}`);
+  const areaPath =
+    `M ${cx(0)},${H - padBottom} ` +
+    bars.map((bar, i) => `L ${cx(i)},${cy(bar.value)}`).join(' ') +
+    ` L ${cx(n - 1)},${H - padBottom} Z`;
+  const linePath = `M ${linePoints.join(' L ')}`;
+
   return (
-    <div className="flex h-32 items-end gap-2">
-      {bars.map((bar) => (
-        <div key={bar.key} className="flex flex-1 flex-col items-center gap-1">
-          <span className="text-[11px] font-medium text-slate-400">{bar.value || ''}</span>
-          <div className="flex w-full flex-1 items-end">
-            <div
-              className="w-full rounded-t-md transition-all"
-              style={{
-                height: `${bar.value === 0 ? 3 : Math.max((bar.value / max) * 100, 8)}%`,
-                background:
-                  bar.value === 0
-                    ? 'rgba(148,163,184,.18)'
-                    : `linear-gradient(180deg, ${color}, ${color}44)`,
-              }}
-              title={`${bar.key}: ${bar.value}`}
-            />
+    <div>
+      {/* значения над точками */}
+      <div className="flex">
+        {bars.map((bar) => (
+          <div key={bar.key} className="flex-1 text-center text-[11px] font-medium text-slate-300">
+            {bar.value || ''}
           </div>
-          <span className="text-[11px] text-slate-600">{bar.label}</span>
-        </div>
-      ))}
+        ))}
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 110 }} role="img">
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity="0.45" />
+            <stop offset="100%" stopColor={color} stopOpacity="0.02" />
+          </linearGradient>
+        </defs>
+        <path d={areaPath} fill={`url(#${gradientId})`} />
+        <path d={linePath} fill="none" stroke={color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+        {bars.map((bar, i) => (
+          <circle
+            key={bar.key}
+            cx={cx(i)}
+            cy={cy(bar.value)}
+            r={bar.value > 0 ? 3 : 2}
+            fill={bar.value > 0 ? color : '#475569'}
+          />
+        ))}
+      </svg>
+      {/* подписи дней */}
+      <div className="flex">
+        {bars.map((bar) => (
+          <div key={bar.key} className="flex-1 text-center text-[11px] text-slate-600">
+            {bar.label}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -65,20 +104,20 @@ function Metric({ value, label, tone }: { value: number; label: string; tone?: s
   );
 }
 
-function DirectionCard({ stat }: { stat: ScenarioLeadStat }) {
+function DirectionCard({ stat, color }: { stat: ScenarioLeadStat; color: string }) {
   const conversion = stat.total > 0 ? Math.round((stat.converted / stat.total) * 100) : 0;
   return (
     <Card
       title={stat.name}
       actions={stat.hot > 0 ? <StatusBadge tone="bad">🔥 {stat.hot}</StatusBadge> : null}
     >
-      <div className="mb-4 grid grid-cols-4 gap-3">
+      <div className="mb-3 grid grid-cols-4 gap-3">
         <Metric value={stat.total} label="всего" />
         <Metric value={stat.week} label="за 7 дней" tone="text-amber-400" />
         <Metric value={stat.today} label="сегодня" tone="text-sky-400" />
         <Metric value={stat.converted} label={`продаж · ${conversion}%`} tone="text-emerald-400" />
       </div>
-      <WeekChart series={stat.series} color="#eab308" />
+      <WeekAreaChart series={stat.series} color={color} />
     </Card>
   );
 }
@@ -133,8 +172,12 @@ export default function OverviewPage() {
           </Card>
         ) : (
           <div className="grid gap-4 lg:grid-cols-2">
-            {directions.map((direction) => (
-              <DirectionCard key={direction.scenario_id ?? direction.name} stat={direction} />
+            {directions.map((direction, index) => (
+              <DirectionCard
+                key={direction.scenario_id ?? direction.name}
+                stat={direction}
+                color={PALETTE[index % PALETTE.length]}
+              />
             ))}
           </div>
         )}
