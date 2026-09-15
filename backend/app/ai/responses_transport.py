@@ -47,6 +47,20 @@ RETRYABLE_CODES = frozenset(
     }
 )
 
+# Коды, при которых лёг КОНКРЕТНЫЙ апстрим-провайдер за агрегатором, а не сам
+# шлюз: его авторизация, его внутренняя ошибка, отсутствие модели. Соседние
+# модели (на других провайдерах) это не затрагивает — переключаемся сразу, без
+# повторов мёртвой модели. Без этого 503 с provider_auth_failed от DeepSeek
+# ронял весь ответ, хотя рядом были рабочие gpt-модели (инцидент 2026-09-15).
+PROVIDER_DOWN_CODES = frozenset(
+    {
+        "provider_auth_failed",
+        "provider_error",
+        "upstream_error",
+        "model_not_found",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ResponsesResult:
@@ -216,13 +230,11 @@ class ResponsesTransport:
             ) as response:
                 if response.status_code >= 400:
                     body = (await response.aread()).decode("utf-8", "replace")[:300]
-                    # 5xx — сбой на стороне шлюза/апстрима (перегрузка, обрыв
-                    # сессии к реальному провайдеру за агрегатором): проходит
-                    # сам за секунды, повтор осмыслен. 4xx — ошибка запроса
-                    # (неверный ключ, кривой payload) — повтор её не исправит.
-                    if response.status_code >= 500:
-                        raise TransportUnstableError(f"HTTP {response.status_code}: {body}")
-                    raise AIError(f"HTTP {response.status_code}: {body}")
+                    # Классифицируем по коду в ТЕЛЕ, а не по статусу: за одним и
+                    # тем же 503 codex.sale прячет и общий сбой шлюза (повтор
+                    # осмыслен), и падение конкретного апстрима — provider_auth_
+                    # failed у DeepSeek (лечится сменой модели, а не повтором).
+                    raise _http_error(response.status_code, body)
                 return await self._read_stream(response)
         except httpx.HTTPError as exc:
             # Обрыв на полпути — не приговор ответу: сеть до агрегатора
@@ -267,16 +279,46 @@ class ResponsesTransport:
         )
 
 
+def _classify(code: str, message: str, *, http_status: int | None = None) -> AIError:
+    """Единственное место, где код ошибки агрегатора превращается в наш тип.
+
+    model_not_available / PROVIDER_DOWN_CODES — конкретная модель или её
+    апстрим мертвы: СРАЗУ берём следующую из цепочки, повтор бессмыслен.
+    RETRYABLE_CODES — шлюз просит подождать: повтор той же модели осмыслен.
+    5xx без внятного кода — сбой самого шлюза, общий для всех моделей: повтор
+    той же осмыслен, смена модели — нет. Остальное (кривой запрос, битый
+    ключ) — фатально, повтор не поможет.
+    """
+    if code == "model_not_available" or code in PROVIDER_DOWN_CODES:
+        return ModelUnavailableError(message)
+    if code in RETRYABLE_CODES:
+        return ServiceBusyError(message)
+    if http_status is not None and http_status >= 500:
+        # 5xx без внятного кода — перегрузка/обрыв самого шлюза, общий для всех
+        # моделей: повтор той же осмыслен, смена модели — нет.
+        return TransportUnstableError(message)
+    return AIError(message)
+
+
+def _http_error(status_code: int, body: str) -> AIError:
+    """Разбирает тело HTTP-ошибки агрегатора и классифицирует по коду."""
+    code = ""
+    message = ""
+    try:
+        payload = json.loads(body)
+        error = (payload.get("error") if isinstance(payload, dict) else None) or {}
+        code = str(error.get("code") or error.get("type") or "")
+        message = str(error.get("message") or "")
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    return _classify(code, message or f"HTTP {status_code}: {body}", http_status=status_code)
+
+
 def _failure_error(event: dict[str, Any]) -> AIError:
     error = event.get("error") or (event.get("response") or {}).get("error") or {}
     code = str(error.get("code") or error.get("type") or "")
     message = str(error.get("message") or "AI provider reported a failure")
-
-    if code == "model_not_available":
-        return ModelUnavailableError(message)
-    if code in RETRYABLE_CODES:
-        return ServiceBusyError(message)
-    return AIError(f"{code or 'error'}: {message}")
+    return _classify(code, message)
 
 
 def _text_from_response(response: dict[str, Any] | None) -> str:

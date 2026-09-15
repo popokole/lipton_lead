@@ -133,3 +133,39 @@ class TestGatewayRetry:
             )
         assert calls["n"] == 3
         await rt.close()
+
+    async def test_provider_auth_failed_switches_model_immediately(self) -> None:
+        """Инцидент 2026-09-15: DeepSeek за codex.sale отдаёт 503 с кодом
+        provider_auth_failed. Это не общий сбой шлюза — соседние gpt-модели
+        живы, поэтому надо СРАЗУ взять следующую из цепочки, без повторов
+        мёртвой модели (раньше 6 ретраев + выход без переключения)."""
+        import json as _json
+
+        calls: list[str] = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            model = _json.loads(request.content)["model"]
+            calls.append(model)
+            if model == "deepseek-v4-flash":
+                return httpx.Response(
+                    503,
+                    content=(
+                        b'{"error":{"message":"DeepSeek provider authorization failed",'
+                        b'"type":"server_error","code":"provider_auth_failed"}}'
+                    ),
+                )
+            return httpx.Response(
+                200, content=_SSE_OK, headers={"content-type": "text/event-stream"}
+            )
+
+        rt = _transport(httpx.MockTransport(handle))
+        result = await rt.complete(
+            messages=[{"role": "user", "content": "hi"}],
+            model="deepseek-v4-flash",
+            max_output_tokens=100,
+            fallback_models=["gpt-5.4-mini", "gpt-5.6-sol"],
+        )
+        assert result.text == "привет"
+        # Мёртвую модель дёрнули РОВНО один раз (без ретраев), затем сразу gpt.
+        assert calls == ["deepseek-v4-flash", "gpt-5.4-mini"]
+        await rt.close()
