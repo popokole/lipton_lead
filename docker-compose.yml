@@ -84,6 +84,10 @@ services:
     <<: *backend-env
     restart: unless-stopped
     command: ["python", "-m", "app.worker_main"]
+    # Мягкая остановка: отменить ответы, ждущие паузу сценария (кулдаун
+    # снимается, диалог уходит оператору), погасить клиентов, снять аренды.
+    # Штатных 10 с Docker на это может не хватить — SIGKILL посреди уборки.
+    stop_grace_period: 30s
     depends_on:
       migrate:
         condition: service_completed_successfully

@@ -87,7 +87,13 @@ export function ScenariosView() {
 
   async function save() {
     const replyDelayMin = delayMin ? Number(delayMin) : null;
-    const replyDelayMax = delayMax ? Number(delayMax) : null;
+    // Заполнено только «от» — пауза ровно «от» (так считает и бэкенд). Сохраняем
+    // это явно, чтобы после перезагрузки в «до» было видно то же число.
+    const replyDelayMax = delayMax
+      ? Number(delayMax)
+      : replyDelayMin != null && replyDelayMin > 0
+        ? replyDelayMin
+        : null;
     if (
       (replyDelayMin ?? 0) > REPLY_DELAY_MAX_SECONDS ||
       (replyDelayMax ?? 0) > REPLY_DELAY_MAX_SECONDS
@@ -96,7 +102,11 @@ export function ScenariosView() {
       return;
     }
     if (replyDelayMin != null && replyDelayMax != null && replyDelayMin > replyDelayMax) {
-      setError('Задержка перед ответом: «от» не может быть больше «до»');
+      setError(
+        'Задержка перед ответом: «от» не может быть больше «до». ' +
+          'Чтобы выключить задержку, оставьте пустыми или 0 оба поля; ' +
+          'для точной паузы заполните только «от»',
+      );
       return;
     }
     setBusy(true);

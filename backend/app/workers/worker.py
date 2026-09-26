@@ -78,6 +78,8 @@ from app.workers.registry import (
 logger = get_logger(__name__)
 
 ACCOUNT_POLL_INTERVAL_SECONDS = 5.0
+#: Как часто искать отложенные ответы, зависшие после жёсткого падения воркера.
+STALE_DELAYED_SWEEP_INTERVAL_SECONDS = 600.0
 
 
 class Worker:
@@ -136,6 +138,7 @@ class Worker:
             asyncio.create_task(self._approved_review_loop(), name="worker-review-exec"),
             asyncio.create_task(self._digest_loop(), name="worker-digest"),
             asyncio.create_task(self._reconcile_loop(), name="worker-reconcile"),
+            asyncio.create_task(self._stale_delayed_loop(), name="worker-stale-delayed"),
         ]
         self.set_status(STATUS_HEALTHY)
         await self._sync_status_to_db()
@@ -249,6 +252,7 @@ class Worker:
             validator=ReplyValidator(),
             cooldown=cooldown,
             actions=actions,
+            stop_guard=self._stop_guard,
         )
 
     async def _register(self) -> None:
@@ -654,6 +658,23 @@ class Worker:
                 logger.warning("reconcile_loop_failed", detail=str(exc)[:150])
             await self._sleep(interval)
 
+    async def _stale_delayed_loop(self) -> None:
+        """Отдаёт оператору отложенные (задержка сценария) ответы, зависшие
+        после жёсткого падения воркера — SIGKILL, OOM, перезагрузка хоста.
+
+        Мягкая остановка прибирает за собой сама; этот цикл — страховка, чтобы
+        лид не пропал молча. Первый проход — сразу при старте.
+        """
+        while not self._stop.is_set():
+            try:
+                if self._reply_pipeline is not None:
+                    await self._reply_pipeline.sweep_stale_scheduled()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — зачистка не критичнее работы
+                logger.warning("stale_delayed_sweep_failed", detail=str(exc)[:150])
+            await self._sleep(STALE_DELAYED_SWEEP_INTERVAL_SECONDS)
+
     async def _digest_loop(self) -> None:
         """Раз в день шлёт сводку по лидам в лог-чат (в digest_hour)."""
         while not self._stop.is_set():
@@ -790,3 +811,24 @@ class Worker:
         if self._accounts is None:
             return
         await self._accounts.on_client_status(account_id, status, error)
+
+        # Аккаунт ушёл с воркера — его ответы, ждущие паузу сценария, отменяем
+        # сразу, а не через час эскалацией «аккаунт не подключён» (или, хуже,
+        # устаревшим ответом после повторного подключения). OFFLINE считаем
+        # уходом, только если клиент снят совсем (отключение/выход оператором,
+        # потеря аренды): при обрыве связи супервизор переподключится сам.
+        if self._reply_pipeline is None:
+            return
+        reason: str | None = None
+        if status is AccountStatus.AUTH_REQUIRED:
+            reason = "аккаунту нужна повторная авторизация"
+        elif status is AccountStatus.OFFLINE and self._clients.health(account_id) is None:
+            reason = "аккаунт отключён от воркера"
+        if reason is None:
+            return
+        try:
+            await self._reply_pipeline.cancel_account(account_id, reason)
+        except Exception as exc:  # noqa: BLE001 — отмена не важнее смены статуса
+            logger.warning(
+                "delayed_replies_cancel_failed", account_id=str(account_id), detail=str(exc)[:150]
+            )

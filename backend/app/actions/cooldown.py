@@ -134,6 +134,17 @@ class CooldownGuard:
         """Снимает одиночный ключ claim_once раньше его TTL."""
         await self._redis.delete(key)
 
+    async def extend_once(self, key: str, seconds: int) -> None:
+        """Держит одиночный ключ claim_once ещё `seconds` секунд от текущего момента.
+
+        Нужен, когда действие, ради которого ключ заняли, откладывается (своя
+        пауза сценария): лимит должен считаться от реальной отправки, а не от
+        момента захвата.
+        """
+        if seconds <= 0:
+            return
+        await self._redis.set(key, "1", ex=seconds)
+
     async def check(self, cooldown_keys: CooldownKeys, spec: CooldownSpec) -> CooldownVerdict:
         """Дешёвая проверка перед обращением к AI."""
         scopes = cooldown_keys.scopes(spec)
