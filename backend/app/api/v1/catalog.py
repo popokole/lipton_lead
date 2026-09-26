@@ -38,6 +38,7 @@ from app.schemas.resources import (
     ScenarioCreate,
     ScenarioOut,
     ScenarioUpdate,
+    check_reply_delay_order,
 )
 
 chats_router = APIRouter(prefix="/chats", tags=["chats"])
@@ -257,6 +258,12 @@ async def update_scenario(
         raise NotFoundError("Сценарий не найден")
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(scenario, field, value)
+    # PATCH может прислать только одну границу задержки — сверяем её с той,
+    # что уже лежит в базе, иначе вместо 422 упадёт CHECK-ограничение.
+    try:
+        check_reply_delay_order(scenario.reply_delay_min_seconds, scenario.reply_delay_max_seconds)
+    except ValueError as exc:
+        raise InvalidInputError(str(exc)) from exc
     await db.flush()
     return ScenarioOut.model_validate(scenario)
 

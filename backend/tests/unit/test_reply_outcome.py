@@ -24,6 +24,9 @@ from app.pipeline.reply_pipeline import ReplyOutcome
         (ActionType.REPLY, ActionStatus.FAILED, ProcessedStatus.FAILED),
         (ActionType.IGNORE, ActionStatus.FAILED, ProcessedStatus.FAILED),
         (ActionType.TAG_USER, ActionStatus.REJECTED, ProcessedStatus.FAILED),
+        # Отложенный задержкой сценария ответ ещё в работе, а не сбой.
+        (ActionType.REPLY, ActionStatus.PENDING, ProcessedStatus.MATCHED),
+        (ActionType.IGNORE, ActionStatus.PENDING, ProcessedStatus.FAILED),
     ],
 )
 def test_processed_status_mapping(

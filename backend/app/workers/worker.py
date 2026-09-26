@@ -104,6 +104,8 @@ class Worker:
             self.runtime.database, default_user_cooldown=settings.default_cooldown_seconds
         )
         self._pipeline: MonitorPipeline | None = None
+        # Отдельная ссылка — ради shutdown(): там живут отложенные ответы.
+        self._reply_pipeline: ReplyPipeline | None = None
         self._reconciler: ChatReconciler | None = None
         self._clients = ClientManager(
             settings,
@@ -164,13 +166,14 @@ class Worker:
             EventPublisher(redis),
         )
         publisher = EventPublisher(redis)
+        self._reply_pipeline = self._build_reply_pipeline(publisher, redis)
         self._pipeline = MonitorPipeline(
             settings,
             self.runtime.database,
             self._rules,
             self._self_guard,
             publisher,
-            reply_pipeline=self._build_reply_pipeline(publisher, redis),
+            reply_pipeline=self._reply_pipeline,
             peers=self._peers,
             stop_guard=self._stop_guard,
         )
@@ -281,6 +284,12 @@ class Worker:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._tasks.clear()
+
+        # Отложенные ответы (задержка сценария) — до остановки клиентов, пока
+        # живы база и Redis: отменённый ответ снимает кулдаун и уходит оператору.
+        if self._reply_pipeline is not None:
+            with contextlib.suppress(Exception):
+                await self._reply_pipeline.shutdown()
 
         with contextlib.suppress(Exception):
             await self._notifier.close()

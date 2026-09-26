@@ -100,6 +100,8 @@ export interface Scenario {
   review_when_uncertain?: boolean;
   review_min_confidence?: number | null;
   one_shot?: boolean;
+  reply_delay_min_seconds?: number | null;
+  reply_delay_max_seconds?: number | null;
   knowledge_base_id?: string | null;
   fallback_texts: string[];
   enabled: boolean;

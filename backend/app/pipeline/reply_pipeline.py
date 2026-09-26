@@ -18,16 +18,23 @@
 Любой отказ на любой стадии заканчивается действием — IGNORE или
 ESCALATE_TO_HUMAN. Молча ничего не делать нельзя: в панели это выглядит как
 сбой, и оператор не понимает, почему система промолчала.
+
+Своя задержка сценария (reply_delay_*) выдерживается ПОСЛЕ атомарного захвата
+cooldown и ДО первой отправки — в фоновой задаче (см. _schedule), а не прямо
+в handle(): иначе пауза до часа держала бы вызывающего.
 """
 
 from __future__ import annotations
 
+import asyncio
+import math
 import random
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from app.actions.cooldown import CooldownGuard, CooldownKeys
+from app.actions.cooldown import CooldownClaim, CooldownGuard, CooldownKeys
 from app.actions.engine import ActionEngine, ActionRequest, ActionResult
 from app.actions.validator import ReplyValidator, ValidationContext, ValidationVerdict
 from app.ai.analyzer import AIAnalyzer, AnalysisOutcome
@@ -36,6 +43,7 @@ from app.conversations.context import ContextBuilder, PromptContext
 from app.core.config import Settings
 from app.core.errors import AIError
 from app.core.logging import get_logger
+from app.database.repositories.messages import MessageRepository
 from app.database.repositories.rules import RuleRepository
 from app.database.session import Database
 from app.models import ActionStatus, ActionType, ProcessedStatus, Scenario
@@ -43,6 +51,16 @@ from app.rules.engine import RuleMatch
 from app.telegram.messages import NormalizedMessage
 
 logger = get_logger(__name__)
+
+#: Сколько при остановке воркера ждём, пока отменённые отложенные ответы
+#: приберут за собой (кулдаун, эскалация, статус сообщения).
+DELAYED_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+#: Запас TTL метки «ответ уже запланирован» (one_shot) сверх самой паузы — на
+#: отправку с имитацией набора. Метка снимается задачей сама; TTL — страховка
+#: на случай, если воркер умер, не успев прибрать.
+_PENDING_MARGIN_SECONDS = 600
+
+Sleep = Callable[[float], Awaitable[None]]
 
 _ACTION_TO_PROCESSED_STATUS: dict[ActionType, ProcessedStatus] = {
     ActionType.REPLY: ProcessedStatus.REPLIED,
@@ -68,15 +86,55 @@ class ReplyOutcome:
         return self.action is ActionType.REPLY and self.status is ActionStatus.SENT
 
     @property
+    def scheduled(self) -> bool:
+        """Ответ отложен задержкой сценария и уйдёт из фоновой задачи."""
+        return self.action is ActionType.REPLY and self.status is ActionStatus.PENDING
+
+    @property
     def processed_status(self) -> ProcessedStatus:
         """Итоговый статус сообщения-триггера по реально выполненному действию.
 
         ActionStatus описывает жизненный цикл самого Action (ушло/не ушло),
         а не бизнес-исход для панели — отсюда отдельный маппинг.
         """
+        if self.scheduled:
+            # Ещё в работе: итоговый статус запишет отложенная задача.
+            return ProcessedStatus.MATCHED
         if self.status is not ActionStatus.SENT:
             return ProcessedStatus.FAILED
         return _ACTION_TO_PROCESSED_STATUS.get(self.action, ProcessedStatus.ACTED)
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedReply:
+    """Готовый к отправке ответ: всё, что нужно, чтобы отправить его сейчас
+    или после паузы сценария, и прибрать за собой, если не вышло."""
+
+    request: ActionRequest
+    claim: CooldownClaim | None
+    message: NormalizedMessage
+    match: RuleMatch
+    chat_id: uuid.UUID | None
+    message_id: uuid.UUID | None
+    conversation_id: uuid.UUID | None
+    analysis: AnalysisOutcome | None
+    verdict: ValidationVerdict
+    delay: float = 0.0
+    # Метка «ответ уже запланирован» для one_shot (снимается после отправки).
+    pending_key: str | None = None
+
+
+def reply_delay_seconds(scenario: Scenario) -> float:
+    """Пауза перед авто-ответом по настройкам сценария; 0 — без паузы.
+
+    Случайная в [min, max], чтобы ответы не приходили через одно и то же
+    время. Пусто/0 в обоих полях — без паузы; задан только min — ровно min.
+    """
+    low = max(scenario.reply_delay_min_seconds or 0, 0)
+    high = max(scenario.reply_delay_max_seconds or 0, low)
+    if high <= 0:
+        return 0.0
+    return random.uniform(low, high)
 
 
 class ReplyPipeline:
@@ -91,6 +149,7 @@ class ReplyPipeline:
         validator: ReplyValidator,
         cooldown: CooldownGuard,
         actions: ActionEngine,
+        sleep: Sleep = asyncio.sleep,
     ) -> None:
         self._settings = settings
         self._database = database
@@ -100,6 +159,29 @@ class ReplyPipeline:
         self._validator = validator
         self._cooldown = cooldown
         self._actions = actions
+        self._sleep = sleep
+        # Отложенные ответы: держим ссылки, иначе задачу может собрать GC, и
+        # отменяем их при остановке воркера (shutdown).
+        self._delayed: set[asyncio.Task[None]] = set()
+        self._closing = False
+
+    async def shutdown(self, grace_seconds: float = DELAYED_SHUTDOWN_TIMEOUT_SECONDS) -> None:
+        """Отменяет ещё не отправленные отложенные ответы и ждёт их уборки.
+
+        Отменённая задача сама снимает кулдаун и отдаёт диалог человеку (см.
+        _wait_and_deliver). Новые отложенные ответы после этого не
+        планируются, а сразу уходят оператору (см. _schedule).
+        """
+        self._closing = True
+        tasks = list(self._delayed)
+        if not tasks:
+            return
+        logger.info("delayed_replies_cancelling", count=len(tasks))
+        for task in tasks:
+            task.cancel()
+        _done, pending = await asyncio.wait(tasks, timeout=grace_seconds)
+        if pending:
+            logger.warning("delayed_replies_cleanup_timeout", pending=len(pending))
 
     async def handle(
         self,
@@ -254,15 +336,30 @@ class ReplyPipeline:
 
         # «Один заход»: если с этим собеседником уже связывались — больше не
         # пишем (одно первое сообщение с контактом и всё).
-        if (
-            scenario.one_shot
-            and not test_mode
-            and message.sender_tg_id is not None
-            and await self._already_contacted(message.account_id, message.sender_tg_id)
-        ):
-            return await self._ignore(
-                message, match, chat_id, message_id, "one_shot: уже связались", analysis=analysis
-            )
+        one_shot_peer = message.sender_tg_id if scenario.one_shot and not test_mode else None
+        if one_shot_peer is not None:
+            if await self._already_contacted(message.account_id, one_shot_peer):
+                return await self._ignore(
+                    message,
+                    match,
+                    chat_id,
+                    message_id,
+                    "one_shot: уже связались",
+                    analysis=analysis,
+                )
+            # Лид заводится только на отправке, а отложенный ответ ещё ждёт
+            # паузу сценария: дешёвая проверка метки до обращения к модели.
+            # Атомарный захват — в _send.
+            pending_key = _one_shot_pending_key(message.account_id, one_shot_peer)
+            if await self._cooldown.is_held(pending_key):
+                return await self._ignore(
+                    message,
+                    match,
+                    chat_id,
+                    message_id,
+                    "one_shot: ответ уже запланирован",
+                    analysis=analysis,
+                )
 
         context = await self._context.build(
             account_id=message.account_id,
@@ -287,6 +384,7 @@ class ReplyPipeline:
                 text=ab_text,
                 used_knowledge=False,
                 cooldown_keys=cooldown_keys,
+                one_shot_peer=one_shot_peer,
                 analysis=analysis,
                 ab_variant_id=ab_id,
             )
@@ -357,6 +455,7 @@ class ReplyPipeline:
                     text=clarification.strip(),
                     used_knowledge=False,
                     cooldown_keys=cooldown_keys,
+                    one_shot_peer=one_shot_peer,
                     analysis=analysis,
                 )
 
@@ -383,6 +482,7 @@ class ReplyPipeline:
                     text=random.choice(scenario.fallback_texts),
                     used_knowledge=False,
                     cooldown_keys=cooldown_keys,
+                    one_shot_peer=one_shot_peer,
                     analysis=analysis,
                 )
             return await self._escalate(
@@ -402,6 +502,7 @@ class ReplyPipeline:
             group_text=generation.reply.group_text,
             used_knowledge=generation.reply.used_knowledge,
             cooldown_keys=cooldown_keys,
+            one_shot_peer=one_shot_peer,
             analysis=analysis,
             review=review_mode,
         )
@@ -423,6 +524,7 @@ class ReplyPipeline:
         analysis: AnalysisOutcome | None,
         review: bool = False,
         ab_variant_id: uuid.UUID | None = None,
+        one_shot_peer: int | None = None,
     ) -> ReplyOutcome:
         verdict = self._validator.validate(
             ValidationContext(
@@ -497,8 +599,27 @@ class ReplyPipeline:
                 validation=verdict,
             )
 
+        # Своя пауза сценария. «Один заход» при паузе столбим атомарно ДО
+        # ожидания: лид заводится только на отправке, и без метки второе
+        # сообщение того же собеседника за время паузы получило бы свой ответ.
+        delay = reply_delay_seconds(scenario)
+        pending_key: str | None = None
+        if delay > 0 and one_shot_peer is not None:
+            pending_key = _one_shot_pending_key(message.account_id, one_shot_peer)
+            ttl = math.ceil(delay) + _PENDING_MARGIN_SECONDS
+            if not await self._cooldown.claim_once(pending_key, ttl):
+                return await self._ignore(
+                    message,
+                    match,
+                    chat_id,
+                    message_id,
+                    "one_shot: ответ уже запланирован",
+                    analysis=analysis,
+                )
+
         allowed, claim = await self._cooldown.claim(cooldown_keys, match.rule.cooldown)
         if not allowed:
+            await self._release_pending(pending_key)
             return await self._ignore(
                 message,
                 match,
@@ -519,8 +640,8 @@ class ReplyPipeline:
         if ab_variant_id is not None:
             action_payload["ab_variant_id"] = str(ab_variant_id)
 
-        result = await self._actions.dispatch(
-            ActionRequest(
+        prepared = _PreparedReply(
+            request=ActionRequest(
                 type=ActionType.REPLY,
                 account_id=message.account_id,
                 dedup_key=_dedup_key(message, ActionType.REPLY),
@@ -533,13 +654,30 @@ class ReplyPipeline:
                 reply_text=reply_text,
                 validation=verdict.to_payload(),
                 payload=action_payload,
-            )
+            ),
+            claim=claim,
+            message=message,
+            match=match,
+            chat_id=chat_id,
+            message_id=message_id,
+            conversation_id=context.conversation_id,
+            analysis=analysis,
+            verdict=verdict,
+            delay=delay,
+            pending_key=pending_key,
         )
+        if delay > 0:
+            return await self._schedule(prepared)
+        return await self._deliver(prepared)
+
+    async def _deliver(self, prepared: _PreparedReply) -> ReplyOutcome:
+        """Отправляет готовый ответ (группа, затем личка — внутри ReplyHandler)."""
+        result = await self._actions.dispatch(prepared.request)
 
         if result.status is not ActionStatus.SENT:
             # Ответ не ушёл — задержку надо снять, иначе следующая попытка
             # окажется заблокированной несостоявшимся ответом.
-            await self._cooldown.release(claim)
+            await self._cooldown.release(prepared.claim)
             # Технический сбой ОТПРАВКИ (напр. Telethon уронил RPC на битом
             # TL-объекте, см. инцидент 2026-09-04) — тот же принцип, что и для
             # analysis.failed выше: это поломка инфраструктуры, а не решение
@@ -547,14 +685,14 @@ class ReplyPipeline:
             # Без явной эскалации это молча оседает статусом FAILED и никто,
             # кроме самого оператора, листающего панель, об этом не узнает.
             return await self._escalate(
-                message,
-                match,
-                chat_id,
-                message_id,
+                prepared.message,
+                prepared.match,
+                prepared.chat_id,
+                prepared.message_id,
                 f"не удалось отправить ответ: {result.detail}",
-                analysis=analysis,
-                validation=verdict,
-                conversation_id=context.conversation_id,
+                analysis=prepared.analysis,
+                validation=prepared.verdict,
+                conversation_id=prepared.conversation_id,
             )
 
         return ReplyOutcome(
@@ -562,9 +700,154 @@ class ReplyPipeline:
             status=result.status,
             reason=result.detail,
             action_id=result.action_id,
-            analysis=analysis,
-            validation=verdict,
+            analysis=prepared.analysis,
+            validation=prepared.verdict,
         )
+
+    # --- отложенная отправка (задержка сценария) ---------------------------
+    async def _schedule(self, prepared: _PreparedReply) -> ReplyOutcome:
+        """Откладывает отправку на prepared.delay секунд в фоновую задачу.
+
+        Ждать прямо здесь нельзя: handle() вызывают и обработчик Telethon, и
+        реконсайлер, который идёт по сообщениям всех аккаунтов подряд одним
+        циклом, — пауза до часа остановила бы довыгрузку для всех. Ожидание
+        идёт ДО отправки, то есть вне блокировки аккаунта в MessageSender:
+        другие ответы с этого аккаунта за это время уходят как обычно.
+
+        Кулдаун (и метка one_shot) уже застолблены, поэтому второе сообщение
+        того же собеседника за время паузы второго ответа не получит.
+        """
+        if self._closing:
+            await self._release_pending(prepared.pending_key)
+            return await self._give_up(
+                prepared,
+                "воркер останавливается — отложенный ответ не отправлен",
+                release_cooldown=True,
+            )
+
+        reason = f"ответ через {prepared.delay:.0f} с (задержка сценария)"
+        # Статус «в работе» пишем ДО запуска задачи: иначе быстрая задача
+        # могла бы записать итог раньше, чем вызывающий — промежуточный.
+        try:
+            await self._set_message_status(prepared, ProcessedStatus.MATCHED, reason)
+        except Exception:
+            await self._cooldown.release(prepared.claim)
+            await self._release_pending(prepared.pending_key)
+            raise
+
+        message = prepared.message
+        task = asyncio.create_task(
+            self._deliver_later(prepared),
+            name=f"delayed-reply-{message.account_id}-{message.tg_chat_id}-{message.tg_message_id}",
+        )
+        self._delayed.add(task)
+        task.add_done_callback(self._on_delayed_done)
+        logger.info("reply_scheduled", delay_seconds=round(prepared.delay, 1), **message.for_log())
+        return ReplyOutcome(
+            action=ActionType.REPLY,
+            status=ActionStatus.PENDING,
+            reason=reason,
+            analysis=prepared.analysis,
+            validation=prepared.verdict,
+        )
+
+    async def _deliver_later(self, prepared: _PreparedReply) -> None:
+        try:
+            await self._wait_and_deliver(prepared)
+        finally:
+            await self._release_pending(prepared.pending_key)
+
+    async def _wait_and_deliver(self, prepared: _PreparedReply) -> None:
+        try:
+            await self._sleep(prepared.delay)
+        except asyncio.CancelledError:
+            # Остановка воркера до отправки: ответа не было — снимаем кулдаун
+            # и отдаём диалог человеку, чтобы лид не пропал молча.
+            await self._finish_given_up(
+                prepared, "отложенный ответ отменён: остановка воркера", release_cooldown=True
+            )
+            raise
+
+        try:
+            outcome = await self._deliver(prepared)
+        except asyncio.CancelledError:
+            # Отправка уже шла — ответ мог уйти. Кулдаун не снимаем, чтобы не
+            # ответить дважды; оператор проверит диалог.
+            await self._finish_given_up(
+                prepared,
+                "отложенный ответ прерван во время отправки (остановка воркера) — проверьте диалог",
+                release_cooldown=False,
+            )
+            raise
+        except Exception as exc:
+            logger.exception("delayed_reply_failed", **prepared.message.for_log())
+            await self._finish_given_up(
+                prepared,
+                f"отложенный ответ упал: {type(exc).__name__}: {exc}",
+                release_cooldown=False,
+            )
+            return
+
+        try:
+            await self._set_message_status(prepared, outcome.processed_status, outcome.reason)
+        except Exception:
+            logger.exception("delayed_reply_status_failed", **prepared.message.for_log())
+
+    async def _give_up(
+        self, prepared: _PreparedReply, reason: str, *, release_cooldown: bool
+    ) -> ReplyOutcome:
+        """Отложенный ответ не отправлен: при необходимости снимаем кулдаун и
+        передаём диалог человеку — молча терять лида нельзя."""
+        if release_cooldown:
+            await self._cooldown.release(prepared.claim)
+        logger.warning("delayed_reply_given_up", reason=reason, **prepared.message.for_log())
+        return await self._escalate(
+            prepared.message,
+            prepared.match,
+            prepared.chat_id,
+            prepared.message_id,
+            reason,
+            analysis=prepared.analysis,
+            validation=prepared.verdict,
+            conversation_id=prepared.conversation_id,
+        )
+
+    async def _finish_given_up(
+        self, prepared: _PreparedReply, reason: str, *, release_cooldown: bool
+    ) -> None:
+        """_give_up + итоговый статус сообщения; уборка не должна падать сама."""
+        try:
+            outcome = await self._give_up(prepared, reason, release_cooldown=release_cooldown)
+            await self._set_message_status(prepared, outcome.processed_status, reason)
+        except Exception:
+            logger.exception("delayed_reply_cleanup_failed", **prepared.message.for_log())
+
+    def _on_delayed_done(self, task: asyncio.Task[None]) -> None:
+        self._delayed.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            # Задача ловит свои ошибки сама; сюда долетает только непредвиденное.
+            logger.error("delayed_reply_crashed", task=task.get_name(), exc_info=exc)
+
+    async def _set_message_status(
+        self, prepared: _PreparedReply, status: ProcessedStatus, reason: str | None
+    ) -> None:
+        if prepared.message_id is None:
+            return
+        async with self._database.session() as db:
+            await MessageRepository(db).set_status(
+                prepared.message_id, status, rule_id=prepared.match.rule.id, reason=reason
+            )
+
+    async def _release_pending(self, key: str | None) -> None:
+        if key is None:
+            return
+        try:
+            await self._cooldown.release_once(key)
+        except Exception as exc:  # noqa: BLE001 — метка всё равно истечёт по TTL
+            logger.warning("one_shot_pending_release_failed", detail=str(exc)[:150])
 
     # --- прочие действия ---------------------------------------------------
     async def _simple_action(
@@ -852,6 +1135,11 @@ def _scenario_settings(scenario: Scenario) -> ScenarioSettings:
         require_grounding=scenario.require_knowledge_grounding,
         reply_in_dm=scenario.reply_in_dm,
     )
+
+
+def _one_shot_pending_key(account_id: uuid.UUID, peer_tg_id: int) -> str:
+    """Метка «этому собеседнику уже запланирован ответ» (one_shot + пауза)."""
+    return f"oneshot:pending:{account_id}:{peer_tg_id}"
 
 
 def _dedup_key(message: NormalizedMessage, action: ActionType) -> str:

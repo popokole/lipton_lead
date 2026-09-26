@@ -67,6 +67,12 @@ class Scenario(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # контактом), дальше в этом диалоге молчим, даже если тема всплывёт снова.
     one_shot: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
 
+    # Своя пауза перед авто-ответом, секунды: ждём случайно в [min, max] до
+    # первой отправки. NULL/0 — без паузы; задан только min — ровно min.
+    # Имитация набора (reply_typing_delay_*) работает поверх неё всегда.
+    reply_delay_min_seconds: Mapped[int | None] = mapped_column(sa.Integer)
+    reply_delay_max_seconds: Mapped[int | None] = mapped_column(sa.Integer)
+
     enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=True)
 
     __table_args__ = (
@@ -80,6 +86,18 @@ class Scenario(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         sa.CheckConstraint(
             "context_messages IS NULL OR context_messages > 0", name="context_messages_positive"
+        ),
+        sa.CheckConstraint(
+            "(reply_delay_min_seconds IS NULL OR "
+            "(reply_delay_min_seconds >= 0 AND reply_delay_min_seconds <= 3600)) AND "
+            "(reply_delay_max_seconds IS NULL OR "
+            "(reply_delay_max_seconds >= 0 AND reply_delay_max_seconds <= 3600))",
+            name="reply_delay_range",
+        ),
+        sa.CheckConstraint(
+            "reply_delay_min_seconds IS NULL OR reply_delay_max_seconds IS NULL "
+            "OR reply_delay_min_seconds <= reply_delay_max_seconds",
+            name="reply_delay_order",
         ),
         sa.Index("ix_scenarios_enabled", "enabled"),
     )

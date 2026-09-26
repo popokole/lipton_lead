@@ -264,10 +264,13 @@ class MonitorPipeline:
             # MATCHED — вход в конвейер, а не итог: без этого IGNORE/ESCALATE
             # оставались бы неотличимы от «ещё обрабатывается».
             status = reply_outcome.processed_status
-            async with self._database.session() as db:
-                await MessageRepository(db).set_status(
-                    message_id, status, rule_id=primary.rule.id, reason=reply_outcome.reason
-                )
+            # Отложенный ответ (задержка сценария) пишет статус сам: и
+            # промежуточный, и итоговый — после отправки из фоновой задачи.
+            if not reply_outcome.scheduled:
+                async with self._database.session() as db:
+                    await MessageRepository(db).set_status(
+                        message_id, status, rule_id=primary.rule.id, reason=reply_outcome.reason
+                    )
 
         return PipelineOutcome(
             status=status,

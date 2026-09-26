@@ -126,6 +126,14 @@ class CooldownGuard:
             return True
         return bool(await self._redis.set(key, "1", nx=True, ex=seconds))
 
+    async def is_held(self, key: str) -> bool:
+        """Дешёвая проверка одиночного ключа claim_once без захвата."""
+        return bool(await self._redis.exists(key))
+
+    async def release_once(self, key: str) -> None:
+        """Снимает одиночный ключ claim_once раньше его TTL."""
+        await self._redis.delete(key)
+
     async def check(self, cooldown_keys: CooldownKeys, spec: CooldownSpec) -> CooldownVerdict:
         """Дешёвая проверка перед обращением к AI."""
         scopes = cooldown_keys.scopes(spec)

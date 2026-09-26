@@ -21,6 +21,9 @@ const SAMPLE_PROMPT =
   'Ты менеджер студии дизайна. Отвечай коротко, по делу и дружелюбно. ' +
   'Уточни задачу и предложи созвон. Не называй цены и сроки, которых нет в контексте.';
 
+// Потолок своей задержки ответа — как на бэкенде (REPLY_DELAY_MAX_SECONDS).
+const REPLY_DELAY_MAX_SECONDS = 3600;
+
 export function ScenariosView() {
   const scenarios = useApi<Scenario[]>('/scenarios', 15_000);
   const [name, setName] = useState('');
@@ -37,6 +40,8 @@ export function ScenariosView() {
   const knowledgeBases = useApi<{ id: string; name: string }[]>('/knowledge', 30_000);
   const [kbId, setKbId] = useState('');
   const [oneShot, setOneShot] = useState(false);
+  const [delayMin, setDelayMin] = useState('');
+  const [delayMax, setDelayMax] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -56,6 +61,8 @@ export function ScenariosView() {
     setReviewMin('0.4');
     setKbId('');
     setOneShot(false);
+    setDelayMin('');
+    setDelayMax('');
   }
 
   function startEdit(s: Scenario) {
@@ -73,10 +80,25 @@ export function ScenariosView() {
     setReviewMin(s.review_min_confidence != null ? String(s.review_min_confidence) : '0.4');
     setKbId(s.knowledge_base_id ?? '');
     setOneShot(s.one_shot ?? false);
+    setDelayMin(s.reply_delay_min_seconds != null ? String(s.reply_delay_min_seconds) : '');
+    setDelayMax(s.reply_delay_max_seconds != null ? String(s.reply_delay_max_seconds) : '');
     if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   async function save() {
+    const replyDelayMin = delayMin ? Number(delayMin) : null;
+    const replyDelayMax = delayMax ? Number(delayMax) : null;
+    if (
+      (replyDelayMin ?? 0) > REPLY_DELAY_MAX_SECONDS ||
+      (replyDelayMax ?? 0) > REPLY_DELAY_MAX_SECONDS
+    ) {
+      setError(`Задержка перед ответом — не больше ${REPLY_DELAY_MAX_SECONDS} с`);
+      return;
+    }
+    if (replyDelayMin != null && replyDelayMax != null && replyDelayMin > replyDelayMax) {
+      setError('Задержка перед ответом: «от» не может быть больше «до»');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -94,6 +116,8 @@ export function ScenariosView() {
         review_min_confidence: reviewUncertain && reviewMin ? Number(reviewMin) : null,
         knowledge_base_id: kbId || null,
         one_shot: oneShot,
+        reply_delay_min_seconds: replyDelayMin,
+        reply_delay_max_seconds: replyDelayMax,
         context_messages: 15,
       };
       if (editingId) {
@@ -229,6 +253,31 @@ export function ScenariosView() {
               />
             </Field>
           )}
+          <div className="lg:col-span-2">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Задержка перед ответом, сек — от">
+                <input
+                  className={inputClass}
+                  inputMode="numeric"
+                  value={delayMin}
+                  onChange={(e) => setDelayMin(e.target.value.replace(/\D/g, ''))}
+                  placeholder="0"
+                />
+              </Field>
+              <Field label="до">
+                <input
+                  className={inputClass}
+                  inputMode="numeric"
+                  value={delayMax}
+                  onChange={(e) => setDelayMax(e.target.value.replace(/\D/g, ''))}
+                  placeholder="0"
+                />
+              </Field>
+            </div>
+            <span className="mt-1 block text-xs text-slate-500">
+              0 или пусто — без задержки. Кроме неё всегда работает имитация набора 5–8 с
+            </span>
+          </div>
           <div className="lg:col-span-2">
             <Field
               label="Критерий лида (для анализатора)"

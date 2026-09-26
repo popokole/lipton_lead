@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.models import (
     AccountStatus,
@@ -201,7 +201,14 @@ class ScenarioOut(ORMModel):
     review_when_uncertain: bool
     review_min_confidence: float | None
     one_shot: bool
+    reply_delay_min_seconds: int | None
+    reply_delay_max_seconds: int | None
     enabled: bool
+
+
+#: Потолок своей задержки ответа: час. Дольше держать ответ в памяти воркера
+#: бессмысленно — собеседник уже ушёл, а рестарт воркера ответ потеряет.
+REPLY_DELAY_MAX_SECONDS = 3600
 
 
 class ScenarioCreate(BaseModel):
@@ -226,7 +233,21 @@ class ScenarioCreate(BaseModel):
     review_when_uncertain: bool = False
     review_min_confidence: float | None = Field(default=None, ge=0, le=1)
     one_shot: bool = False
+    # Пауза перед авто-ответом, секунды (0/пусто — без паузы).
+    reply_delay_min_seconds: int | None = Field(default=None, ge=0, le=REPLY_DELAY_MAX_SECONDS)
+    reply_delay_max_seconds: int | None = Field(default=None, ge=0, le=REPLY_DELAY_MAX_SECONDS)
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def _check_reply_delay_order(self) -> ScenarioCreate:
+        check_reply_delay_order(self.reply_delay_min_seconds, self.reply_delay_max_seconds)
+        return self
+
+
+def check_reply_delay_order(low: int | None, high: int | None) -> None:
+    """«от» не больше «до» — то же, что CHECK reply_delay_order в базе."""
+    if low is not None and high is not None and low > high:
+        raise ValueError("Задержка ответа: «от» не может быть больше «до»")
 
 
 class ScenarioUpdate(ScenarioCreate):
