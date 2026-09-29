@@ -51,7 +51,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from sqlalchemy import update
 
@@ -158,6 +158,31 @@ def format_duration(seconds: float | None) -> str:
     if secs or not parts:
         parts.append(f"{secs} с")
     return " ".join(parts)
+
+
+def _peer_key(chat_id: int | None) -> int | None:
+    """Приводит id чата к одному виду: Bot API (-100…/-…) и «голый» id Telethon."""
+    if chat_id is None:
+        return None
+    if chat_id <= -1_000_000_000_000:
+        return -chat_id - 1_000_000_000_000
+    return abs(chat_id)
+
+
+def is_own_log_traffic(message: Any, target: Any) -> bool:
+    """Сообщение из самого лог-чата или от нашего бота уведомлений.
+
+    На такие сообщения карточек не бывает никогда — иначе аккаунт, который
+    состоит в лог-чате, видит нашу же карточку, правило срабатывает на её
+    текст, и получается бесконечная петля.
+    """
+    chat = _peer_key(getattr(message, "tg_chat_id", None))
+    if chat is not None and chat == _peer_key(getattr(target, "group_id", None)):
+        return True
+    sender = getattr(message, "sender_tg_id", None)
+    token = getattr(target, "token", "") or ""
+    bot_id = token.split(":", 1)[0]
+    return sender is not None and bot_id.isdigit() and int(bot_id) == int(sender)
 
 
 def format_match_card(
@@ -617,6 +642,7 @@ class MatchLogReporter:
         self.throttled = 0
         self.requeued = 0
         self.failed = 0
+        self.loop_guarded = 0
 
     # --- вызывается из конвейера (синхронно, без исключений) -------------------
     def open_card(
@@ -1001,6 +1027,13 @@ class MatchLogReporter:
         async with self._database.session() as db:
             target = await self._notifier.log_target(db, rule_id=card.rule_id)
             if target is None:
+                return None
+            if is_own_log_traffic(card.message, target):
+                # Защита от петли: аккаунт состоит в лог-чате и видит наши же
+                # карточки; правило срабатывает на их текст → новая карточка →
+                # снова совпадение… (авария 29.09: 73 сообщения за 4 минуты).
+                self.loop_guarded += 1
+                logger.warning("match_log_loop_guard", loop_guarded=self.loop_guarded)
                 return None
             account = await db.get(Account, card.message.account_id)
         card.target = target

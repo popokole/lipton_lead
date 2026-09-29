@@ -37,7 +37,6 @@ from app.notifications.match_log import (
     INTERRUPTED_BEFORE_REPLY_LINE,
     INTERRUPTED_LINE,
     NO_REPLY_PIPELINE_LINE,
-    STOPLIST_LINE,
     MatchCard,
     MatchLogReporter,
     crash_line,
@@ -126,29 +125,6 @@ class MonitorPipeline:
                 conv.ab_reply_counted = True
         except Exception as exc:  # noqa: BLE001 — учёт A/B не критичнее обработки
             logger.warning("ab_credit_failed", detail=str(exc)[:150])
-
-    async def _log_stoplisted_match(
-        self, message: NormalizedMessage, chat_id: uuid.UUID, scope: RuleScope
-    ) -> None:
-        """Отправитель в стоп-листе: не отвечаем, но совпадение в лог-чат шлём.
-
-        Правила для такого сообщения прогоняются только ради карточки —
-        статус сообщения, журнал и ответ остаются как раньше (SKIPPED).
-        """
-        if self._match_log is None:
-            return
-        try:
-            matches = await self._rules.match_all(message, chat_id=chat_id, scope=scope)
-        except Exception as exc:  # noqa: BLE001 — карточка не важнее обработки
-            logger.warning("stoplisted_match_check_failed", detail=str(exc)[:150])
-            return
-        if not matches:
-            return
-        card = self._match_log.open_card(
-            message, matches[0], also_matched=[match.rule.name for match in matches[1:]]
-        )
-        if card is not None:
-            card.report_line(STOPLIST_LINE)
 
     async def handle_event(self, account_id: uuid.UUID, event: Any) -> PipelineOutcome:
         """Точка входа для обработчика Telethon."""
@@ -254,9 +230,10 @@ class MonitorPipeline:
             matches = await self._rules.match_all(message, chat_id=chat_id, scope=scope)
         else:
             if blocked:
+                # Стоп-лист — молча, без карточки в лог-чат: в стоп-листе
+                # обычно наш же бот уведомлений, и карточка на его сообщение
+                # в лог-чате запускала бесконечную петлю (авария 29.09).
                 logger.info("stoplisted_sender_skipped", **message.for_log())
-                if fresh and (message.is_private or chat_monitored):
-                    await self._log_stoplisted_match(message, chat_id, scope)
             elif not fresh:
                 logger.info(
                     "stale_message_stored_no_reply",

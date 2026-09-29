@@ -28,7 +28,6 @@ from app.notifications.match_log import (
     INTERRUPTED_BEFORE_REPLY_LINE,
     INTERRUPTED_LINE,
     NO_REPLY_PIPELINE_LINE,
-    STOPLIST_LINE,
     crash_line,
     outcome_line,
 )
@@ -532,7 +531,9 @@ class TestMonitorPipelineCards:
         assert reporter.cards == []
         assert reply.calls == []
 
-    async def test_stoplisted_sender_gets_a_card_but_no_reply(self, store: Store) -> None:
+    async def test_stoplisted_sender_gets_no_card_and_no_reply(self, store: Store) -> None:
+        # Авария 29.09: карточка на сообщение из стоп-листа (наш же бот в
+        # лог-чате) запускала бесконечную петлю — теперь стоп-лист молчит.
         stop_guard = StopGuard()
         stop_guard.update([SENDER], [])
         pipeline, reporter, reply, _ = make_monitor(stop_guard=stop_guard)
@@ -541,7 +542,7 @@ class TestMonitorPipelineCards:
 
         assert result.status is ProcessedStatus.SKIPPED
         assert reply.calls == []
-        assert reporter.cards[0][2].lines == [STOPLIST_LINE]
+        assert reporter.cards == []
 
     async def test_stoplisted_sender_in_an_unmonitored_chat_gets_nothing(
         self, store: Store

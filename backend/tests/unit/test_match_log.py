@@ -1638,3 +1638,32 @@ class TestLogAllMatchesSetting:
         assert notify_api._status(row).log_all_matches is False
         assert notify_api.NotifyUpdate(log_all_matches=False).log_all_matches is False
         assert notify_api.NotifyUpdate().log_all_matches is None, "не трогаем, если не прислали"
+
+
+class TestLoopGuard:
+    """Авария 29.09: карточки на сообщения из самого лог-чата зацикливались."""
+
+    def _msg(self, chat: int, sender: int | None) -> object:
+        return type("M", (), {"tg_chat_id": chat, "sender_tg_id": sender})()
+
+    def _target(self, group: int, token: str = "8982995204:AAtest") -> object:
+        return type("T", (), {"group_id": group, "token": token})()
+
+    def test_message_from_log_group_is_own_traffic(self) -> None:
+        from app.notifications.match_log import is_own_log_traffic
+
+        # Bot API id группы и «голый» id Telethon — одна и та же группа.
+        assert is_own_log_traffic(self._msg(-1004492214793, 111), self._target(-1004492214793))
+        assert is_own_log_traffic(self._msg(4492214793, 111), self._target(-1004492214793))
+
+    def test_message_from_notify_bot_is_own_traffic(self) -> None:
+        from app.notifications.match_log import is_own_log_traffic
+
+        assert is_own_log_traffic(self._msg(-100555, 8982995204), self._target(-1004492214793))
+
+    def test_regular_group_message_is_not_own_traffic(self) -> None:
+        from app.notifications.match_log import is_own_log_traffic
+
+        assert not is_own_log_traffic(self._msg(-1001234567890, 42), self._target(-1004492214793))
+        no_token = self._target(-1004492214793, token="")
+        assert not is_own_log_traffic(self._msg(-1001234567890, None), no_token)
