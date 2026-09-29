@@ -1,4 +1,4 @@
-"""CLI правки постов канала (app/tools/channel_posts.py).
+"""CLI правки и удаления постов канала (app/tools/channel_posts.py).
 
 Воркер подменён: CLI общается с ним только через Command/CommandResult,
 поэтому подделка отвечает на READ_CHANNEL_POSTS и EDIT_MESSAGE по сценарию,
@@ -21,18 +21,24 @@ from app.bus.messages import Command, CommandResult, CommandType
 from app.core.errors import CommandTimeoutError, WorkerUnavailableError
 from app.telegram.channel_posts import entity_signature, render_entities, unparse_html
 from app.tools.channel_posts import (
+    DELETE_EXPIRY_SECONDS,
     EDIT_EXPIRY_SECONDS,
     EXIT_FAILED,
     EXIT_INVALID,
     EXIT_OK,
+    MAX_DELETE_IDS,
+    DeleteOptions,
     EditOptions,
+    IdsError,
     PlanError,
     PlanItem,
     build_parser,
     check_item,
     diff_summary,
     load_plan,
+    parse_ids,
     parse_plan,
+    run_delete,
     run_edit,
     run_read,
 )
@@ -92,6 +98,9 @@ class FakeWorker:
         read_failures: dict[int, BaseException] | None = None,
         on_first_edit: Callable[[], None] | None = None,
         partial_at_offset: int | None = None,
+        delete_script: dict[int, list[Any]] | None = None,
+        undeletable: set[int] | None = None,
+        on_first_delete: Callable[[], None] | None = None,
     ) -> None:
         self.posts = {p["id"]: dict(p) for p in posts or []}
         self.edit_script = edit_script or {}
@@ -99,7 +108,15 @@ class FakeWorker:
         self.read_failures = read_failures or {}
         self.on_first_edit = on_first_edit
         self.partial_at_offset = partial_at_offset
+        # Ключ — первый id пачки.
+        self.delete_script = delete_script or {}
+        self.undeletable = undeletable or set()
+        self.on_first_delete = on_first_delete
         self.commands: list[Command] = []
+
+    @property
+    def deletes(self) -> list[Command]:
+        return [c for c in self.commands if c.type is CommandType.DELETE_MESSAGES]
 
     @property
     def edits(self) -> list[Command]:
@@ -130,7 +147,34 @@ class FakeWorker:
                 return answer
             self._apply(command.payload)
             return CommandResult.success(command.id, edited=True, no_change=False, flood_waited=0)
+        if command.type is CommandType.DELETE_MESSAGES:
+            if len(self.deletes) == 1 and self.on_first_delete is not None:
+                self.on_first_delete()
+            ids = command.payload["ids"]
+            script = self.delete_script.get(ids[0]) or []
+            if script:
+                answer = script.pop(0)
+                if answer is APPLY_THEN_TIMEOUT:
+                    self._delete(command.id, ids)
+                    raise CommandTimeoutError("no answer")
+                if isinstance(answer, BaseException):
+                    raise answer
+                return answer
+            return self._delete(command.id, ids)
         raise AssertionError(f"unexpected command {command.type}")
+
+    def _delete(self, command_id: uuid.UUID, ids: list[int]) -> CommandResult:
+        present = [i for i in ids if i in self.posts]
+        gone = [i for i in present if i not in self.undeletable]
+        for post_id in gone:
+            del self.posts[post_id]
+        return CommandResult.success(
+            command_id,
+            deleted=gone,
+            already_missing=[i for i in ids if i not in present],
+            not_deleted=[i for i in present if i not in gone],
+            flood_waited=0,
+        )
 
     def _apply(self, payload: dict[str, Any]) -> None:
         plain, entities = render_entities(payload["text"], payload["parse_mode"])
@@ -907,6 +951,7 @@ class TestRead:
 
 # --- аргументы ----------------------------------------------------------------
 EDIT_ARGS = ["edit", "--account", "main", "--chat", "@templates", "--plan", "/tmp/plan.json"]
+DELETE_ARGS = ["delete", "--account", "main", "--chat", "@templates", "--ids", "/tmp/ids.txt"]
 
 
 class TestParser:
@@ -942,3 +987,251 @@ class TestParser:
     def test_account_and_chat_are_required(self) -> None:
         with pytest.raises(SystemExit):
             build_parser().parse_args(["read", "--chat", "@templates"])
+
+    def test_delete_defaults(self) -> None:
+        args = build_parser().parse_args(DELETE_ARGS)
+        assert args.apply is False
+        assert args.expect is None
+        assert args.batch == 50
+        assert args.pause == 3.0
+
+    def test_delete_batch_is_bounded(self) -> None:
+        with pytest.raises(SystemExit):
+            build_parser().parse_args([*DELETE_ARGS, "--batch", "101"])
+
+    def test_delete_needs_ids_file(self) -> None:
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["delete", "--account", "main", "--chat", "@t"])
+
+
+# --- delete ------------------------------------------------------------------
+class TestParseIds:
+    def test_json_list(self) -> None:
+        assert parse_ids("[5, 3, 5]") == [3, 5]
+
+    def test_text_with_ranges_commas_and_newlines(self) -> None:
+        assert parse_ids("12, 15\n20-23;9") == [9, 12, 15, 20, 21, 22, 23]
+
+    @pytest.mark.parametrize(
+        "raw", ["", "   ", "[]", "abc", "5-3", "0", "[true]", "[0]", '["1"]', "[1,", "1-2-3"]
+    )
+    def test_bad_input(self, raw: str) -> None:
+        with pytest.raises(IdsError):
+            parse_ids(raw)
+
+    def test_too_many(self) -> None:
+        with pytest.raises(IdsError):
+            parse_ids(f"1-{MAX_DELETE_IDS + 1}")
+
+
+async def delete(
+    worker: FakeWorker,
+    ids: list[int],
+    tmp_path: Path,
+    *,
+    lines: list[str] | None = None,
+    sleep: RecordingSleep | None = None,
+    **options: Any,
+) -> int:
+    return await run_delete(
+        worker,
+        account_id=ACCOUNT,
+        chat="@templates",
+        ids=ids,
+        options=DeleteOptions(backup_dir=tmp_path, **options),
+        echo=(lines if lines is not None else []).append,
+        sleep=sleep or RecordingSleep(),
+        now=lambda: NOW,
+    )
+
+
+def delete_results(tmp_path: Path) -> dict[str, Any]:
+    return read_json(tmp_path / f"channel_delete_results_{STAMP}.json")
+
+
+def statuses(report: dict[str, Any]) -> list[tuple[int, str]]:
+    return [(item["id"], item["status"]) for item in report["items"]]
+
+
+class TestDeleteDryRun:
+    async def test_lists_posts_and_changes_nothing(self, tmp_path: Path) -> None:
+        worker = FakeWorker([post(1, "первый шаблон"), post(2, "второй")])
+        lines: list[str] = []
+
+        code = await delete(worker, [1, 2, 9], tmp_path, lines=lines)
+
+        assert code == EXIT_OK
+        assert worker.deletes == []
+        assert set(worker.posts) == {1, 2}
+        assert any("первый шаблон" in line for line in lines)
+        assert "Итого: к удалению 2, уже нет в канале 1" in lines
+        assert lines[-1].endswith("--apply --expect 2.")
+        assert list(tmp_path.iterdir()) == []
+
+    async def test_dry_run_results_file(self, tmp_path: Path) -> None:
+        worker = FakeWorker([post(1, "a")])
+        out = tmp_path / "dry.json"
+
+        await delete(worker, [1, 2], tmp_path, results_path=out)
+
+        report = read_json(out)
+        assert report["kind"] == "channel_delete_results"
+        assert report["applied"] is False
+        assert statuses(report) == [(1, "dry_run_not_attempted"), (2, "dry_run_missing")]
+
+
+class TestDeleteApply:
+    async def test_expect_mismatch_deletes_nothing(self, tmp_path: Path) -> None:
+        worker = FakeWorker([post(1, "a"), post(2, "b")])
+        lines: list[str] = []
+
+        code = await delete(worker, [1, 2, 3], tmp_path, apply=True, expect=3, lines=lines)
+
+        assert code == EXIT_INVALID
+        assert worker.deletes == []
+        assert list(tmp_path.iterdir()) == []
+        assert "ничего не удаляю" in lines[-1]
+
+    async def test_backup_first_then_batches_with_pause(self, tmp_path: Path) -> None:
+        backup = tmp_path / f"channel_delete_backup_{STAMP}.json"
+        seen_backup: list[bool] = []
+        worker = FakeWorker(
+            [post(i, f"пост {i}") for i in range(1, 6)],
+            on_first_delete=lambda: seen_backup.append(backup.exists()),
+        )
+        sleep = RecordingSleep()
+
+        code = await delete(
+            worker,
+            [1, 2, 3, 4, 5, 8],
+            tmp_path,
+            apply=True,
+            expect=5,
+            batch_size=2,
+            pause_seconds=3.0,
+            sleep=sleep,
+        )
+
+        assert code == EXIT_OK
+        assert seen_backup == [True]
+        saved = read_json(backup)
+        assert saved["kind"] == "channel_delete_backup"
+        assert [p["id"] for p in saved["posts"]] == [1, 2, 3, 4, 5]
+        assert saved["posts"][0]["text"] == "пост 1"
+        assert [c.payload["ids"] for c in worker.deletes] == [[1, 2], [3, 4], [5]]
+        assert worker.deletes[0].payload == {
+            "chat": MARKED_ID,
+            "ids": [1, 2],
+            "expires_at": NOW.timestamp() + DELETE_EXPIRY_SECONDS,
+        }
+        assert sleep.calls == [3.0, 3.0]
+        assert worker.posts == {}
+        report = delete_results(tmp_path)
+        assert report["applied"] is True
+        assert report["backup"] == str(backup)
+        assert statuses(report) == [(i, "deleted") for i in range(1, 6)] + [(8, "missing")]
+
+    async def test_nothing_to_delete(self, tmp_path: Path) -> None:
+        worker = FakeWorker([post(1, "a")])
+
+        code = await delete(worker, [7], tmp_path, apply=True, expect=1)
+
+        assert code == EXIT_OK
+        assert worker.deletes == []
+
+    async def test_posts_kept_by_telegram_stop_the_run(self, tmp_path: Path) -> None:
+        worker = FakeWorker([post(i, "x") for i in range(1, 5)], undeletable={2})
+        lines: list[str] = []
+
+        code = await delete(
+            worker, [1, 2, 3, 4], tmp_path, apply=True, expect=4, batch_size=2, lines=lines
+        )
+
+        assert code == EXIT_FAILED
+        assert len(worker.deletes) == 1
+        assert statuses(delete_results(tmp_path)) == [
+            (1, "deleted"),
+            (2, "not_deleted"),
+            (3, "not_attempted"),
+            (4, "not_attempted"),
+        ]
+        assert any("Удалять сообщения" in line for line in lines)
+
+    async def test_vanished_before_command_counts_as_deleted(self, tmp_path: Path) -> None:
+        worker = FakeWorker(
+            [post(1, "a"), post(2, "b")],
+            delete_script={
+                1: [success(deleted=[1], already_missing=[2], not_deleted=[], flood_waited=0)]
+            },
+        )
+
+        code = await delete(worker, [1, 2], tmp_path, apply=True, expect=2)
+
+        assert code == EXIT_OK
+        assert statuses(delete_results(tmp_path)) == [(1, "deleted"), (2, "deleted")]
+
+    async def test_short_flood_wait_is_waited_and_retried(self, tmp_path: Path) -> None:
+        worker = FakeWorker(
+            [post(1, "a")],
+            delete_script={1: [failure("telegram_flood_wait", "wait", seconds=40)]},
+        )
+        sleep = RecordingSleep()
+
+        code = await delete(worker, [1], tmp_path, apply=True, expect=1, sleep=sleep)
+
+        assert code == EXIT_OK
+        assert len(worker.deletes) == 2
+        assert sleep.calls == [41]
+        assert delete_results(tmp_path)["items"][0]["status"] == "deleted"
+
+    async def test_long_flood_wait_stops(self, tmp_path: Path) -> None:
+        worker = FakeWorker(
+            [post(1, "a"), post(2, "b")],
+            delete_script={1: [failure("telegram_flood_wait", "wait", seconds=500)]},
+        )
+
+        code = await delete(worker, [1, 2], tmp_path, apply=True, expect=2, batch_size=1)
+
+        assert code == EXIT_FAILED
+        assert len(worker.deletes) == 1
+        items = delete_results(tmp_path)["items"]
+        assert items[0]["status"] == "failed"
+        assert items[0]["retry_after"] == 500
+        assert items[1]["status"] == "not_attempted"
+
+    async def test_worker_error_stops(self, tmp_path: Path) -> None:
+        worker = FakeWorker(
+            [post(1, "a")],
+            delete_script={1: [failure("message_delete_forbidden", "нет права")]},
+        )
+        lines: list[str] = []
+
+        code = await delete(worker, [1], tmp_path, apply=True, expect=1, lines=lines)
+
+        assert code == EXIT_FAILED
+        assert delete_results(tmp_path)["items"][0]["error_code"] == "message_delete_forbidden"
+        assert "message_delete_forbidden" in lines[-1]
+
+    async def test_timeout_is_resolved_by_rereading(self, tmp_path: Path) -> None:
+        worker = FakeWorker([post(1, "a"), post(2, "b")], delete_script={1: [APPLY_THEN_TIMEOUT]})
+
+        code = await delete(worker, [1, 2], tmp_path, apply=True, expect=2, batch_size=1)
+
+        assert code == EXIT_OK
+        # Первую пачку не переотправили: её исход узнали чтением.
+        assert [c.payload["ids"] for c in worker.deletes] == [[1], [2]]
+        assert statuses(delete_results(tmp_path)) == [(1, "deleted"), (2, "deleted")]
+
+    async def test_timeout_and_failed_reread_is_unknown(self, tmp_path: Path) -> None:
+        worker = FakeWorker(
+            [post(1, "a")],
+            delete_script={1: [CommandTimeoutError("no answer")]},
+            read_failures={1: WorkerUnavailableError("down")},
+        )
+
+        code = await delete(worker, [1], tmp_path, apply=True, expect=1)
+
+        assert code == EXIT_FAILED
+        item = delete_results(tmp_path)["items"][0]
+        assert item["status"] == "unknown"
+        assert item["error_code"] == "delete_unconfirmed"

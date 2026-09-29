@@ -1,4 +1,4 @@
-"""Чтение и правка постов канала от имени аккаунта (не бота).
+"""Чтение, правка и удаление постов канала от имени аккаунта (не бота).
 
 Задача владельца: в канале, где наш аккаунт — администратор, прочитать все
 посты-шаблоны и потом заменить их тексты. Делает это живой Telethon-клиент
@@ -25,6 +25,9 @@
     на команду пережидаем FloodWait до FLOOD_RETRY_MAX_SECONDS; дольше —
     отдаём вызывающему с числом секунд;
   - MessageNotModified — не ошибка: текст уже такой, какой просили;
+  - удаление повторяемо: воркер смотрит, какие посты есть, удаляет их и
+    перечитывает, так что повтор той же команды после таймаута ничего не
+    ломает — удалённые придут в already_missing;
   - HTML постов — свой, без потерь (спойлеры, блоки кода с языком), и один и
     тот же для выгрузки, подсчёта длины и правки;
   - в лог уходят только id и длины, не тексты постов.
@@ -60,6 +63,8 @@ DEFAULT_READ_LIMIT = 100
 # ответ каждого разбирается атомарно (см. app/pipeline/reconcile.py): одна
 # битая пачка не должна прятать уже прочитанные посты.
 READ_BATCH_SIZE = 100
+# channels.deleteMessages принимает до 100 id за запрос.
+DELETE_IDS_MAX = 100
 FLOOD_RETRY_MAX_SECONDS = 30
 PARSE_MODES: tuple[str, ...] = ("html", "md")
 _MAX_MESSAGE_ID = 2**31 - 1
@@ -327,6 +332,13 @@ class EditRequest:
     expires_at: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class DeleteRequest:
+    chat: str | int
+    ids: tuple[int, ...]
+    expires_at: float | None = None
+
+
 def parse_read_payload(payload: dict[str, Any]) -> ReadRequest:
     """READ_CHANNEL_POSTS: {chat, limit ≤ 500, offset_id = 0, ids?}.
 
@@ -367,20 +379,35 @@ def parse_edit_payload(payload: dict[str, Any]) -> EditRequest:
     if not isinstance(link_preview, bool):
         raise InvalidInputError("Field 'link_preview' must be a boolean")
 
-    expires_at = payload.get("expires_at")
-    if expires_at is not None and (
-        isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or expires_at <= 0
-    ):
-        raise InvalidInputError("Field 'expires_at' must be a unix timestamp")
-
     return EditRequest(
         chat=chat,
         message_id=message_id,
         text=text,
         parse_mode=parse_mode,
         link_preview=link_preview,
-        expires_at=float(expires_at) if expires_at is not None else None,
+        expires_at=_expires_at(payload),
     )
+
+
+def parse_delete_payload(payload: dict[str, Any]) -> DeleteRequest:
+    """DELETE_MESSAGES: {chat, ids (1..100), expires_at?}."""
+    chat = channel_reference(payload.get("chat"))
+    raw_ids = payload.get("ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise InvalidInputError("Field 'ids' must be a non-empty list of message ids")
+    if len(raw_ids) > DELETE_IDS_MAX:
+        raise InvalidInputError(f"Field 'ids' accepts at most {DELETE_IDS_MAX} ids")
+    ids = tuple(dict.fromkeys(_positive_id(value, "ids[]") for value in raw_ids))
+    return DeleteRequest(chat=chat, ids=ids, expires_at=_expires_at(payload))
+
+
+def _expires_at(payload: dict[str, Any]) -> float | None:
+    expires_at = payload.get("expires_at")
+    if expires_at is None:
+        return None
+    if isinstance(expires_at, bool) or not isinstance(expires_at, int | float) or expires_at <= 0:
+        raise InvalidInputError("Field 'expires_at' must be a unix timestamp")
+    return float(expires_at)
 
 
 def _int_field(payload: dict[str, Any], field: str, default: int, *, low: int, high: int) -> int:
@@ -1069,14 +1096,91 @@ async def edit_post(
 
 
 def _check_not_expired(request: EditRequest, now: Now) -> None:
-    if request.expires_at is None or now().timestamp() <= request.expires_at:
-        return
-    raise ChannelPostError(
-        "command_expired",
+    _check_deadline(
+        request.expires_at,
+        now,
         f"Команда правки поста {request.message_id} просрочена: воркер взял её позже, "
         "чем её ждали, — правка не применена",
         message_id=request.message_id,
     )
+
+
+def _check_deadline(expires_at: float | None, now: Now, message: str, **details: Any) -> None:
+    if expires_at is None or now().timestamp() <= expires_at:
+        return
+    raise ChannelPostError("command_expired", message, **details)
+
+
+# --- удаление ----------------------------------------------------------------
+async def delete_posts(
+    client: Any,
+    request: DeleteRequest,
+    *,
+    sleep: Sleep = asyncio.sleep,
+    now: Now = utcnow,
+) -> dict[str, Any]:
+    """Удаляет посты канала у всех подписчиков.
+
+    Сначала смотрит, какие из id есть в канале, удаляет только их и
+    перечитывает: в ответе — что удалено (deleted), чего не было ещё до
+    команды (already_missing) и что осталось, хотя удалить просили
+    (not_deleted: например, у аккаунта нет права удалять чужие посты, а
+    Telegram промолчал).
+    """
+    from telethon.errors import RPCError
+
+    expired = (
+        f"Команда удаления {len(request.ids)} постов просрочена: воркер взял её позже, "
+        "чем её ждали, — ничего не удалено"
+    )
+    _check_deadline(request.expires_at, now, expired)
+
+    budget = _FloodBudget(sleep)
+    with _flood_waits_surface(client):
+        entity = await budget.run(
+            partial(resolve_chat_entity, client, request.chat), step="resolve"
+        )
+        require_channel(entity)
+        found, already_missing = await _fetch_by_ids(client, entity, request.ids, budget)
+        present = [int(message.id) for message in found]
+        log_fields = {
+            "tg_chat_id": describe_chat(entity)["id"],
+            "requested": len(request.ids),
+            "present": len(present),
+        }
+
+        remaining: list[int] = []
+        if present:
+
+            async def apply_delete() -> Any:
+                # Как у правки: после FloodWait вызывающий мог уже не ждать.
+                _check_deadline(request.expires_at, now, expired)
+                return await client.delete_messages(entity, present, revoke=True)
+
+            try:
+                await budget.run(apply_delete, step="delete", **log_fields)
+            except RPCError as exc:
+                raise telegram_error(exc) from None
+            except ValueError as exc:
+                raise telegram_unavailable(exc) from None
+            left, _ = await _fetch_by_ids(client, entity, present, budget)
+            remaining = [int(message.id) for message in left]
+
+    kept = set(remaining)
+    deleted = [message_id for message_id in present if message_id not in kept]
+    logger.info(
+        "channel_posts_deleted",
+        deleted=len(deleted),
+        not_deleted=len(remaining),
+        already_missing=len(already_missing),
+        **log_fields,
+    )
+    return {
+        "deleted": deleted,
+        "already_missing": already_missing,
+        "not_deleted": remaining,
+        "flood_waited": budget.waited,
+    }
 
 
 # --- ошибки Telegram ---------------------------------------------------------
@@ -1114,6 +1218,12 @@ def telegram_error(exc: BaseException) -> AppError:
             "канала нужно право администратора «Редактировать сообщения»",
         ),
         (tg.MessageIdInvalidError, "message_not_found", "Сообщения с таким id нет в этом чате"),
+        (
+            tg.MessageDeleteForbiddenError,
+            "message_delete_forbidden",
+            "Telegram не даёт удалить эти сообщения: нужно право администратора "
+            "«Удалять сообщения»",
+        ),
         (
             tg.MessageEditTimeExpiredError,
             "message_edit_time_expired",

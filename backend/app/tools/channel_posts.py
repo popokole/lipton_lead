@@ -1,4 +1,5 @@
-"""CLI: прочитать посты канала и заменить их тексты от имени нашего аккаунта.
+"""CLI: прочитать посты канала, заменить их тексты или удалить лишние — от имени
+нашего аккаунта.
 
 Запуск — внутри контейнера api (там настройки, Redis и база):
 
@@ -13,6 +14,12 @@
     # применить
     python -m app.tools.channel_posts edit --account "Основной" --chat @my_channel \\
         --plan /tmp/plan.json --apply
+
+    # удалить посты: сначала проверка, потом --apply с числом постов из проверки
+    python -m app.tools.channel_posts delete --account "Основной" --chat @my_channel \\
+        --ids /tmp/delete.txt
+    python -m app.tools.channel_posts delete --account "Основной" --chat @my_channel \\
+        --ids /tmp/delete.txt --apply --expect 423
 
 План — JSON-список {"id": <id поста>, "text": "<новый текст>"}. Необязательно:
 "html" — новый текст в HTML (уходит с parse_mode=html вместо text),
@@ -37,6 +44,12 @@ EDIT_MESSAGE уходят воркеру через шину — так же, к
 повторять. Повторяется только FloodWait не длиннее --max-flood-wait. Если
 воркер не ответил на правку вовремя, команда повторно не отправляется: CLI
 перечитывает пост и по нему решает, применилась ли правка.
+
+Удаление необратимо, поэтому: без --apply только список того, что будет
+удалено; с --apply обязателен --expect — число постов, которое показала
+проверка (не совпало — ничего не удаляется); перед удалением пишется бэкап
+текстов (channel_delete_backup_<время>.json; медиа по нему не вернуть).
+Файл --ids — JSON-список id или текст вида «12 15 20-40».
 """
 
 from __future__ import annotations
@@ -105,6 +118,13 @@ DEFAULT_PAGE_PAUSE_SECONDS = 1.0
 DEFAULT_PAUSE_SECONDS = 4.0
 DEFAULT_MAX_FLOOD_WAIT = 120
 IDS_PER_REQUEST = 100
+# Удаление пачки: чтение, удаление и перечитывание — три запроса к Telegram.
+DELETE_EXPIRY_SECONDS = 60.0
+DELETE_TIMEOUT_SECONDS = 120.0
+DEFAULT_DELETE_BATCH = 50
+DELETE_BATCH_MAX = 100
+DEFAULT_DELETE_PAUSE_SECONDS = 3.0
+MAX_DELETE_IDS = 5000
 MAX_PAGES = 2000
 _FRAGMENT = 30
 
@@ -128,6 +148,10 @@ class CliError(Exception):
 
 class PlanError(CliError):
     pass
+
+
+class IdsError(CliError):
+    """Файл со списком id для удаления не разобран."""
 
 
 class AccountLookupError(CliError):
@@ -1020,6 +1044,343 @@ def _report(
     }
 
 
+# --- delete ------------------------------------------------------------------
+_ID_TOKEN_RE = re.compile(r"^(\d+)(?:-(\d+))?$")
+
+
+def load_ids(path: Path) -> list[int]:
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        raise IdsError(f"Не удалось прочитать {path}: {exc}") from None
+    return parse_ids(raw)
+
+
+def parse_ids(raw: str) -> list[int]:
+    """JSON-список id или текст «12 15 20-40» (запятые и переводы строк тоже)."""
+    text = raw.strip()
+    if not text:
+        raise IdsError("Список id пуст")
+    ids: list[int] = []
+    if text.startswith("["):
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise IdsError(f"Некорректный JSON: {exc}") from None
+        for value in data:
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise IdsError(f"В JSON-списке не id поста: {value!r}")
+            ids.append(value)
+    else:
+        for token in re.split(r"[\s,;]+", text):
+            match = _ID_TOKEN_RE.match(token)
+            if not match:
+                raise IdsError(f"Не понял «{token}»: нужен id или диапазон вида 20-40")
+            low = int(match.group(1))
+            high = int(match.group(2) or low)
+            if low <= 0 or high < low:
+                raise IdsError(f"Некорректный диапазон «{token}»")
+            if high - low >= MAX_DELETE_IDS:
+                raise IdsError(f"Диапазон «{token}» длиннее {MAX_DELETE_IDS} id")
+            ids.extend(range(low, high + 1))
+    unique = sorted(set(ids))
+    if not unique:
+        raise IdsError("Список id пуст")
+    if len(unique) > MAX_DELETE_IDS:
+        raise IdsError(f"За один запуск удаляется не больше {MAX_DELETE_IDS} id")
+    return unique
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteOptions:
+    apply: bool = False
+    # Сколько постов ожидается к удалению: сверяется с каналом перед --apply.
+    expect: int | None = None
+    batch_size: int = DEFAULT_DELETE_BATCH
+    pause_seconds: float = DEFAULT_DELETE_PAUSE_SECONDS
+    max_flood_wait: int = DEFAULT_MAX_FLOOD_WAIT
+    backup_dir: Path = field(default_factory=lambda: Path(tempfile.gettempdir()))
+    results_path: Path | None = None
+
+
+async def run_delete(
+    caller: Caller,
+    *,
+    account_id: uuid.UUID,
+    chat: str,
+    ids: list[int],
+    options: DeleteOptions,
+    echo: Echo = print,
+    sleep: Sleep = asyncio.sleep,
+    now: Clock = utcnow,
+) -> int:
+    """Dry-run по умолчанию; с options.apply — сверка --expect, бэкап, удаление пачками."""
+    current = await read_by_ids(caller, account_id, chat, ids)
+    target: ChatRef = current["target"]
+    posts: list[dict[str, Any]] = current["posts"]
+    existing = [int(post["id"]) for post in posts]
+    missing = sorted(int(post_id) for post_id in current["missing_ids"])
+
+    mode = "УДАЛЕНИЕ (--apply)" if options.apply else "ПРОВЕРКА (dry-run)"
+    echo(f"Чат: {_chat_title(current['chat'], chat)} — {mode}")
+    for post in posts:
+        echo(f"{_post_line(post)}  {_snippet(post.get('text') or '')}".rstrip())
+    echo(f"Итого: к удалению {len(existing)}, уже нет в канале {len(missing)}")
+
+    started = now()
+    stamp = _stamp(started)
+    rows: dict[int, dict[str, Any]] = {
+        post_id: {"id": post_id, "status": "missing"} for post_id in missing
+    }
+    for post in posts:
+        rows[int(post["id"])] = {
+            "id": int(post["id"]),
+            "status": "not_attempted",
+            "media_type": post.get("media_type"),
+            "length": post.get("length"),
+        }
+
+    if not options.apply:
+        if options.results_path is not None:
+            dry = [{**rows[i], "status": "dry_run_" + rows[i]["status"]} for i in sorted(rows)]
+            write_json(
+                options.results_path,
+                _delete_report(account_id, chat, current["chat"], started, now(), False, None, dry),
+            )
+        echo(
+            "Это проверка: в канале ничего не удалено. Чтобы удалить — добавьте "
+            f"--apply --expect {len(existing)}."
+        )
+        return EXIT_OK
+
+    if not existing:
+        echo("Удалять нечего: этих постов в канале уже нет.")
+        return EXIT_OK
+    if options.expect != len(existing):
+        echo(
+            f"--expect {options.expect} не совпадает с числом постов к удалению "
+            f"({len(existing)}) — ничего не удаляю. Проверьте список и запустите снова."
+        )
+        return EXIT_INVALID
+
+    backup_path = options.backup_dir / f"channel_delete_backup_{stamp}.json"
+    write_json(
+        backup_path,
+        {
+            "kind": "channel_delete_backup",
+            "account_id": str(account_id),
+            "chat": chat,
+            "chat_info": current["chat"],
+            "saved_at": started.isoformat(),
+            "posts": posts,
+        },
+    )
+    echo(f"Бэкап удаляемых постов: {backup_path} (тексты и даты; медиа по нему не вернуть)")
+
+    results_path = options.results_path or (
+        options.backup_dir / f"channel_delete_results_{stamp}.json"
+    )
+    batches = [
+        existing[start : start + options.batch_size]
+        for start in range(0, len(existing), options.batch_size)
+    ]
+    stopped: dict[str, Any] | None = None
+    deleted_total = 0
+    try:
+        for number, batch in enumerate(batches, start=1):
+            if number > 1:
+                await sleep(options.pause_seconds)
+            for post_id in batch:
+                rows[post_id] = {**rows[post_id], "status": "in_flight"}
+            outcome = await _delete_batch(
+                caller, account_id, target, batch, options, echo, sleep, now
+            )
+            gone = set(outcome.get("deleted") or [])
+            for post_id in batch:
+                if post_id in gone:
+                    status = "deleted"
+                elif outcome["status"] in ("ok", "partial"):
+                    status = "not_deleted"
+                else:
+                    status = outcome["status"]
+                rows[post_id] = {**rows[post_id], "status": status}
+                for key in ("error_code", "error_message", "retry_after"):
+                    if key in outcome and status not in ("deleted", "not_deleted"):
+                        rows[post_id][key] = outcome[key]
+            deleted_total += len(gone)
+            echo(_delete_progress(number, len(batches), batch, outcome, deleted_total))
+            if outcome["status"] != "ok":
+                stopped = {**outcome, "batch": number}
+                break
+    finally:
+        ordered = [rows[post_id] for post_id in sorted(rows)]
+        write_json(
+            results_path,
+            _delete_report(
+                account_id, chat, current["chat"], started, now(), True, backup_path, ordered
+            ),
+        )
+        summary = _count_statuses(ordered)
+        echo("Результат: " + ", ".join(f"{key} {value}" for key, value in sorted(summary.items())))
+        echo(f"Результаты: {results_path}")
+
+    if stopped is None:
+        return EXIT_OK
+    if stopped["status"] == "partial":
+        echo(
+            f"Остановлено на пачке {stopped['batch']}: Telegram не удалил "
+            f"{len(stopped['not_deleted'])} постов (например, #{stopped['not_deleted'][0]}) — "
+            "проверьте права аккаунта «Удалять сообщения». Следующие пачки не тронуты."
+        )
+    elif stopped["status"] == "unknown":
+        echo(
+            f"Остановлено на пачке {stopped['batch']}: исход неизвестен — "
+            f"{stopped.get('error_message')}. Следующие пачки не тронуты."
+        )
+    else:
+        echo(
+            f"Остановлено на пачке {stopped['batch']}: {stopped.get('error_code')}: "
+            f"{stopped.get('error_message')}. Следующие пачки не тронуты."
+        )
+    return EXIT_FAILED
+
+
+async def _delete_batch(
+    caller: Caller,
+    account_id: uuid.UUID,
+    target: ChatRef,
+    batch: list[int],
+    options: DeleteOptions,
+    echo: Echo,
+    sleep: Sleep,
+    now: Clock,
+) -> dict[str, Any]:
+    """Одна пачка. ok — удалены все; partial — Telegram часть оставил."""
+    waited = 0
+    for attempt in (1, 2):
+        payload = {
+            "chat": target,
+            "ids": batch,
+            "expires_at": now().timestamp() + DELETE_EXPIRY_SECONDS,
+        }
+        command = Command(type=CommandType.DELETE_MESSAGES, account_id=account_id, payload=payload)
+        try:
+            result = await caller(command, DELETE_TIMEOUT_SECONDS)
+        except CommandTimeoutError:
+            echo(
+                f"    воркер не ответил за {DELETE_TIMEOUT_SECONDS:.0f} с — "
+                "перечитываю пачку; повторно удаление не отправляю"
+            )
+            return await _verify_deleted(caller, account_id, target, batch, waited)
+        except AppError as exc:
+            return _batch_failed(exc.code, exc.message, waited)
+
+        if result.ok:
+            waited += int(result.data.get("flood_waited") or 0)
+            # already_missing — посты, что были при проверке, но исчезли до
+            # команды: их удалил прошлый запуск или человек. Для нас — удалены.
+            gone = set(result.data.get("deleted") or []) | set(
+                result.data.get("already_missing") or []
+            )
+            left = [post_id for post_id in batch if post_id not in gone]
+            return {
+                "status": "partial" if left else "ok",
+                "deleted": [post_id for post_id in batch if post_id in gone],
+                "not_deleted": left,
+                "flood_waited": waited,
+            }
+
+        seconds = _flood_seconds(result.error_code, result.data, result.error_message)
+        if attempt == 1 and seconds is not None and seconds <= options.max_flood_wait:
+            echo(f"    Telegram просит подождать {seconds} с — жду и повторяю пачку")
+            waited += seconds
+            await sleep(seconds + 1)
+            continue
+        failed = _batch_failed(result.error_code or "unknown", result.error_message or "", waited)
+        if seconds is not None:
+            failed["retry_after"] = seconds
+        return failed
+    return _batch_failed("retries_exhausted", "Повторы исчерпаны", waited)  # pragma: no cover
+
+
+async def _verify_deleted(
+    caller: Caller,
+    account_id: uuid.UUID,
+    target: ChatRef,
+    batch: list[int],
+    waited: int,
+) -> dict[str, Any]:
+    """Удаление без ответа: что исчезло, узнаём, перечитав пачку."""
+    command = Command(
+        type=CommandType.READ_CHANNEL_POSTS,
+        account_id=account_id,
+        payload={"chat": target, "ids": batch},
+    )
+    try:
+        data = await call_ok(caller, command, READ_TIMEOUT_SECONDS)
+    except (CommandFailedError, AppError) as exc:
+        return {
+            "status": "unknown",
+            "error_code": "delete_unconfirmed",
+            "error_message": "воркер не ответил на удаление, а перечитать пачку не удалось "
+            f"({exc.code}) — посты могли удалиться, запустите проверку снова",
+            "flood_waited": waited,
+        }
+    left = {int(post["id"]) for post in data.get("posts") or []}
+    return {
+        "status": "partial" if left else "ok",
+        "deleted": [post_id for post_id in batch if post_id not in left],
+        "not_deleted": [post_id for post_id in batch if post_id in left],
+        "flood_waited": waited,
+        "verified_after_timeout": True,
+    }
+
+
+def _batch_failed(code: str, message: str, waited: int) -> dict[str, Any]:
+    return {
+        "status": "failed",
+        "deleted": [],
+        "error_code": code,
+        "error_message": message,
+        "flood_waited": waited,
+    }
+
+
+def _delete_progress(
+    number: int, total: int, batch: list[int], outcome: dict[str, Any], deleted_total: int
+) -> str:
+    head = f"[{number}/{total}] #{batch[0]}…#{batch[-1]}:"
+    status = outcome["status"]
+    if status == "failed":
+        return f"{head} ОШИБКА {outcome.get('error_code')}"
+    if status == "unknown":
+        return f"{head} НЕИЗВЕСТНО (воркер не ответил)"
+    done = len(outcome.get("deleted") or [])
+    tail = f", не удалено {len(outcome['not_deleted'])}" if outcome.get("not_deleted") else ""
+    return f"{head} удалено {done}{tail} (всего {deleted_total})"
+
+
+def _snippet(text: str) -> str:
+    line = " ".join(text.split())
+    return line if len(line) <= 50 else line[:49] + "…"
+
+
+def _delete_report(
+    account_id: uuid.UUID,
+    chat: str,
+    chat_info: dict[str, Any] | None,
+    started: datetime,
+    finished: datetime,
+    applied: bool,
+    backup_path: Path | None,
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        **_report(account_id, chat, chat_info, started, finished, applied, backup_path, rows),
+        "kind": "channel_delete_results",
+    }
+
+
 # --- аккаунт -----------------------------------------------------------------
 _PHONE_RE = re.compile(r"^\+?[\d\s()-]{7,}$")
 
@@ -1086,6 +1447,13 @@ def _page_size(value: str) -> int:
     return number
 
 
+def _delete_batch_size(value: str) -> int:
+    number = int(value)
+    if not 1 <= number <= DELETE_BATCH_MAX:
+        raise argparse.ArgumentTypeError(f"от 1 до {DELETE_BATCH_MAX}")
+    return number
+
+
 def _non_negative_float(value: str) -> float:
     number = float(value)
     if number < 0:
@@ -1096,7 +1464,9 @@ def _non_negative_float(value: str) -> float:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app.tools.channel_posts",
-        description="Посты канала от имени нашего аккаунта (не бота): выгрузка и замена текстов.",
+        description=(
+            "Посты канала от имени нашего аккаунта (не бота): выгрузка, замена текстов, удаление."
+        ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -1179,15 +1549,63 @@ def build_parser() -> argparse.ArgumentParser:
         help="каталог для бэкапа и результатов",
     )
     edit.add_argument("--results", type=Path, default=None, help="куда записать результаты JSON")
+
+    delete = commands.add_parser(
+        "delete", parents=[common], help="удалить посты у всех (необратимо)"
+    )
+    delete.add_argument(
+        "--ids",
+        type=Path,
+        required=True,
+        help="файл с id: JSON-список или текст «12 15 20-40»",
+    )
+    delete.add_argument(
+        "--apply", action="store_true", help="удалить (без флага — только список к удалению)"
+    )
+    delete.add_argument(
+        "--expect",
+        type=_positive_int,
+        default=None,
+        help="сколько постов удалится (число из проверки); обязателен с --apply",
+    )
+    delete.add_argument(
+        "--batch",
+        type=_delete_batch_size,
+        default=DEFAULT_DELETE_BATCH,
+        help=f"постов в одной команде воркеру, до {DELETE_BATCH_MAX}",
+    )
+    delete.add_argument(
+        "--pause",
+        type=_non_negative_float,
+        default=DEFAULT_DELETE_PAUSE_SECONDS,
+        help="пауза между пачками, с",
+    )
+    delete.add_argument(
+        "--backup-dir",
+        type=Path,
+        default=Path(tempfile.gettempdir()),
+        help="каталог для бэкапа и результатов",
+    )
+    delete.add_argument("--results", type=Path, default=None, help="куда записать результаты JSON")
     return parser
 
 
 async def _run(args: argparse.Namespace) -> int:
     plan: list[PlanItem] = []
+    delete_ids: list[int] = []
     try:
         if args.command == "edit":
             plan = load_plan(args.plan)
+        if args.command == "delete":
+            delete_ids = load_ids(args.ids)
+            if args.apply and args.expect is None:
+                raise IdsError(
+                    "С --apply нужен --expect: число постов к удалению из проверки без --apply"
+                )
         normalize_chat_reference(args.chat)  # кривую ссылку ловим до подключений
+    except IdsError as exc:
+        print(f"Ошибка списка id: {exc}")
+        return EXIT_INVALID
     except CliError as exc:
         print(f"Ошибка плана:\n{exc}")
         return EXIT_INVALID
@@ -1226,6 +1644,22 @@ async def _run(args: argparse.Namespace) -> int:
                 page_size=args.page_size,
                 page_pause=args.page_pause,
                 max_flood_wait=args.max_flood_wait,
+            )
+        if args.command == "delete":
+            return await run_delete(
+                caller,
+                account_id=account_id,
+                chat=args.chat,
+                ids=delete_ids,
+                options=DeleteOptions(
+                    apply=args.apply,
+                    expect=args.expect,
+                    batch_size=args.batch,
+                    pause_seconds=args.pause,
+                    max_flood_wait=args.max_flood_wait,
+                    backup_dir=args.backup_dir,
+                    results_path=args.results,
+                ),
             )
         return await run_edit(
             caller,

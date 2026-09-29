@@ -19,8 +19,10 @@ from app.database.session import Database
 from app.telegram.account_manager import AccountManager
 from app.telegram.auth_flow import AuthFlow, SignInResult
 from app.telegram.channel_posts import (
+    delete_posts,
     edit_post,
     normalize_chat_reference,
+    parse_delete_payload,
     parse_edit_payload,
     parse_read_payload,
     read_posts,
@@ -85,6 +87,7 @@ class CommandHandler:
             CommandType.CHAT_PHOTO: self._chat_photo,
             CommandType.READ_CHANNEL_POSTS: self._read_channel_posts,
             CommandType.EDIT_MESSAGE: self._edit_message,
+            CommandType.DELETE_MESSAGES: self._delete_messages,
         }
         handler = handlers.get(command.type)
         if handler is None:
@@ -242,6 +245,11 @@ class CommandHandler:
         request = parse_edit_payload(command.payload)
         client = self._require_client(command.account_id)
         return await edit_post(client, request)
+
+    async def _delete_messages(self, command: Command) -> dict[str, Any]:
+        request = parse_delete_payload(command.payload)
+        client = self._require_client(command.account_id)
+        return await delete_posts(client, request)
 
     async def _chat_photo(self, command: Command) -> dict[str, Any]:
         """Скачивает аватар чата в память. Пусто — фото нет, это не ошибка."""

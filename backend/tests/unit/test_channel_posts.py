@@ -1,4 +1,4 @@
-"""Чтение и правка постов канала на стороне воркера (app/telegram/channel_posts.py).
+"""Чтение, правка и удаление постов канала на стороне воркера (app/telegram/channel_posts.py).
 
 Реальный Telegram в тестах запрещён (ТЗ §37). Большая часть тестов идёт на
 управляемой подделке клиента, которая повторяет семантику Telethon там, где на
@@ -30,18 +30,22 @@ from app.bus.messages import Command, CommandType
 from app.core.errors import InvalidInputError, TelegramError, TelegramFloodWaitError
 from app.telegram.channel_posts import (
     CAPTION_LIMIT,
+    DELETE_IDS_MAX,
     FLOOD_RETRY_MAX_SECONDS,
     POST_HTML,
     READ_LIMIT_MAX,
     TEXT_LIMIT,
     ChannelPostError,
+    DeleteRequest,
     EditRequest,
     ReadRequest,
+    delete_posts,
     edit_post,
     entity_signature,
     html_is_lossless,
     media_type,
     normalize_chat_reference,
+    parse_delete_payload,
     parse_edit_payload,
     parse_html,
     parse_read_payload,
@@ -96,6 +100,9 @@ class ChannelClient:
     # Как у Telethon: история от нового к старому.
     history: list[Any] = field(default_factory=list)
     edit_errors: list[BaseException] = field(default_factory=list)
+    delete_errors: list[BaseException] = field(default_factory=list)
+    # Посты, которые Telegram молча не удаляет (нет права на чужие посты).
+    undeletable: set[int] = field(default_factory=set)
     get_messages_errors: list[BaseException] = field(default_factory=list)
     # Ошибка поиска чата: на любую ссылку, на конкретную, разовая (очередь).
     resolve_error: BaseException | None = None
@@ -166,6 +173,14 @@ class ChannelClient:
         if self.edit_errors:
             raise self.edit_errors.pop(0)
         return Msg(id=message, message=text, edit_date=DATE)
+
+    async def delete_messages(self, entity: Any, message_ids: Any, *, revoke: bool = True) -> Any:
+        self._record("delete_messages", list(message_ids), revoke)
+        if self.delete_errors:
+            raise self.delete_errors.pop(0)
+        gone = set(message_ids) - self.undeletable
+        self.history = [m for m in self.history if m.id not in gone]
+        return [SimpleNamespace(pts_count=len(gone))]
 
     def count(self, name: str) -> int:
         return sum(1 for call in self.calls if call[0] == name)
@@ -1081,6 +1096,24 @@ class TestCommandHandler:
         assert result.error_code == "invalid_input"
         assert "parse_mode" in (result.error_message or "")
 
+    async def test_delete_messages_command(self) -> None:
+        client = ChannelClient(history=[Msg(id=2), Msg(id=1)])
+
+        result = await make_handler(client).handle(
+            command(CommandType.DELETE_MESSAGES, chat="@templates", ids=[1, 9])
+        )
+
+        assert result.ok
+        assert result.data["deleted"] == [1]
+        assert result.data["already_missing"] == [9]
+
+    async def test_delete_payload_is_validated_before_client_lookup(self) -> None:
+        result = await make_handler(None).handle(
+            command(CommandType.DELETE_MESSAGES, chat="@templates", ids=[])
+        )
+
+        assert result.error_code == "invalid_input"
+
     async def test_resolve_chat_uses_shared_resolver(self) -> None:
         client = ChannelClient()
 
@@ -1091,6 +1124,153 @@ class TestCommandHandler:
         assert result.ok
         assert result.data["username"] == "templates"
         assert ("get_input_entity", "@templates") in client.calls
+
+
+class TestParseDeletePayload:
+    def test_valid_payload_dedups_ids(self) -> None:
+        request = parse_delete_payload(
+            {"chat": "@templates", "ids": [5, 3, 5], "expires_at": 1_700_000_000}
+        )
+
+        assert request == DeleteRequest(chat="@templates", ids=(5, 3), expires_at=1_700_000_000.0)
+
+    @pytest.mark.parametrize("ids", [None, [], "1,2", [0], [-1], [True], ["1"]])
+    def test_bad_ids(self, ids: Any) -> None:
+        with pytest.raises(InvalidInputError):
+            parse_delete_payload({"chat": "@templates", "ids": ids})
+
+    def test_too_many_ids(self) -> None:
+        with pytest.raises(InvalidInputError, match="at most"):
+            parse_delete_payload({"chat": "@templates", "ids": list(range(1, DELETE_IDS_MAX + 2))})
+
+    @pytest.mark.parametrize("expires_at", [True, "soon", 0, -5])
+    def test_bad_expires_at(self, expires_at: Any) -> None:
+        with pytest.raises(InvalidInputError, match="expires_at"):
+            parse_delete_payload({"chat": "@templates", "ids": [1], "expires_at": expires_at})
+
+    def test_chat_is_required(self) -> None:
+        with pytest.raises(InvalidInputError):
+            parse_delete_payload({"ids": [1]})
+
+
+def delete_request(*ids: int, **kwargs: Any) -> DeleteRequest:
+    return DeleteRequest(chat="@templates", ids=ids, **kwargs)
+
+
+class TestDeletePosts:
+    async def test_deletes_only_present_posts_for_everyone(self) -> None:
+        client = ChannelClient(history=[Msg(id=3), Msg(id=2), Msg(id=1)])
+
+        result = await delete_posts(client, delete_request(1, 3, 7))
+
+        assert ("delete_messages", [1, 3], True) in client.calls
+        assert result == {
+            "deleted": [1, 3],
+            "already_missing": [7],
+            "not_deleted": [],
+            "flood_waited": 0,
+        }
+        assert [m.id for m in client.history] == [2]
+
+    async def test_nothing_present_means_no_delete_request(self) -> None:
+        client = ChannelClient(history=[Msg(id=1)])
+
+        result = await delete_posts(client, delete_request(5, 6))
+
+        assert client.count("delete_messages") == 0
+        assert result["deleted"] == []
+        assert result["already_missing"] == [5, 6]
+
+    async def test_repeat_after_success_is_harmless(self) -> None:
+        client = ChannelClient(history=[Msg(id=2), Msg(id=1)])
+
+        await delete_posts(client, delete_request(1, 2))
+        again = await delete_posts(client, delete_request(1, 2))
+
+        assert client.count("delete_messages") == 1
+        assert again["already_missing"] == [1, 2]
+
+    async def test_silently_kept_posts_are_reported(self) -> None:
+        client = ChannelClient(history=[Msg(id=2), Msg(id=1)], undeletable={2})
+
+        result = await delete_posts(client, delete_request(1, 2))
+
+        assert result["deleted"] == [1]
+        assert result["not_deleted"] == [2]
+
+    async def test_short_flood_wait_is_retried_once_with_telethon_sleep_off(self) -> None:
+        client = ChannelClient(history=[Msg(id=1)], delete_errors=[flood(5)])
+        sleep = RecordingSleep()
+
+        result = await delete_posts(client, delete_request(1), sleep=sleep)
+
+        assert sleep.calls == [6]
+        assert client.count("delete_messages") == 2
+        assert result["deleted"] == [1]
+        assert result["flood_waited"] == 5
+        assert set(client.thresholds) == {0}
+        assert client.flood_sleep_threshold == 60
+
+    async def test_long_flood_wait_goes_to_caller(self) -> None:
+        client = ChannelClient(
+            history=[Msg(id=1)], delete_errors=[flood(FLOOD_RETRY_MAX_SECONDS + 1)]
+        )
+
+        with pytest.raises(TelegramFloodWaitError) as caught:
+            await delete_posts(client, delete_request(1), sleep=RecordingSleep())
+
+        assert caught.value.seconds == FLOOD_RETRY_MAX_SECONDS + 1
+        assert [m.id for m in client.history] == [1]
+
+    async def test_forbidden_has_its_own_code(self) -> None:
+        client = ChannelClient(
+            history=[Msg(id=1)],
+            delete_errors=[errors.MessageDeleteForbiddenError(request=None)],
+        )
+
+        with pytest.raises(ChannelPostError) as caught:
+            await delete_posts(client, delete_request(1))
+
+        assert caught.value.code == "message_delete_forbidden"
+
+    async def test_expired_command_touches_nothing(self) -> None:
+        client = ChannelClient(history=[Msg(id=1)])
+
+        with pytest.raises(ChannelPostError) as caught:
+            await delete_posts(
+                client,
+                delete_request(1, expires_at=DATE.timestamp() - 1),
+                now=lambda: DATE,
+            )
+
+        assert caught.value.code == "command_expired"
+        assert client.calls == []
+
+    async def test_expiry_is_checked_again_after_flood_wait(self) -> None:
+        # Старт и первая попытка — в срок, повтор после FloodWait — уже нет.
+        moments = iter([DATE.timestamp(), DATE.timestamp(), DATE.timestamp() + 100])
+        client = ChannelClient(history=[Msg(id=1)], delete_errors=[flood(5)])
+
+        with pytest.raises(ChannelPostError) as caught:
+            await delete_posts(
+                client,
+                delete_request(1, expires_at=DATE.timestamp() + 10),
+                sleep=RecordingSleep(),
+                now=lambda: datetime.fromtimestamp(next(moments), tz=UTC),
+            )
+
+        assert caught.value.code == "command_expired"
+        assert client.count("delete_messages") == 1
+        assert [m.id for m in client.history] == [1]
+
+    async def test_only_channels(self) -> None:
+        client = ChannelClient(entity=Channel(broadcast=False, megagroup=True), history=[Msg(id=1)])
+
+        with pytest.raises(ChannelPostError) as caught:
+            await delete_posts(client, delete_request(1))
+
+        assert caught.value.code == "not_a_channel"
+        assert client.count("delete_messages") == 0
 
 
 # --- настоящий TelegramClient ------------------------------------------------
