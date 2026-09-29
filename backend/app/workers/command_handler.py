@@ -18,6 +18,14 @@ from app.database.repositories.accounts import AccountRepository
 from app.database.session import Database
 from app.telegram.account_manager import AccountManager
 from app.telegram.auth_flow import AuthFlow, SignInResult
+from app.telegram.channel_posts import (
+    edit_post,
+    normalize_chat_reference,
+    parse_edit_payload,
+    parse_read_payload,
+    read_posts,
+    resolve_chat_entity,
+)
 from app.telegram.client_manager import ClientManager
 from app.telegram.sender import MessageSender
 from app.telegram.session_manager import SessionManager
@@ -50,7 +58,9 @@ class CommandHandler:
             data = await self._dispatch(command)
         except AppError as exc:
             logger.warning("command_failed", code=exc.code, **command.redacted())
-            return CommandResult.failure(command.id, exc.code, exc.message)
+            return CommandResult.failure(
+                command.id, exc.code, exc.message, data=_plain_details(exc.details)
+            )
         except Exception as exc:
             # Цикл чтения стрима не должен падать из-за одной команды.
             logger.exception("command_crashed", **command.redacted())
@@ -73,6 +83,8 @@ class CommandHandler:
             CommandType.SEND_MESSAGE: self._send_message,
             CommandType.ACCOUNT_INFO: self._account_info,
             CommandType.CHAT_PHOTO: self._chat_photo,
+            CommandType.READ_CHANNEL_POSTS: self._read_channel_posts,
+            CommandType.EDIT_MESSAGE: self._edit_message,
         }
         handler = handlers.get(command.type)
         if handler is None:
@@ -194,11 +206,9 @@ class CommandHandler:
 
     async def _resolve_chat(self, command: Command) -> dict[str, Any]:
         client = self._require_client(command.account_id)
-        reference: str | int = self._required(command, "reference")
-        if isinstance(reference, str) and reference.lstrip("-").isdigit():
-            reference = int(reference)
+        reference = normalize_chat_reference(self._required(command, "reference"))
 
-        entity = await client.get_entity(reference)
+        entity = await resolve_chat_entity(client, reference)
         return {
             "tg_chat_id": int(getattr(entity, "id", 0)),
             "title": getattr(entity, "title", None) or _user_title(entity),
@@ -219,6 +229,19 @@ class CommandHandler:
             reply_to=int(reply_to) if reply_to is not None else None,
         )
         return {"tg_message_id": sent.tg_message_id, "chat_id": sent.chat_id}
+
+    # --- посты канала (от имени аккаунта, не бота) -------------------------
+    async def _read_channel_posts(self, command: Command) -> dict[str, Any]:
+        # Payload проверяем до клиента: кривой запрос — ошибка ввода, даже
+        # если аккаунт сейчас не подключён.
+        request = parse_read_payload(command.payload)
+        client = self._require_client(command.account_id)
+        return await read_posts(client, request)
+
+    async def _edit_message(self, command: Command) -> dict[str, Any]:
+        request = parse_edit_payload(command.payload)
+        client = self._require_client(command.account_id)
+        return await edit_post(client, request)
 
     async def _chat_photo(self, command: Command) -> dict[str, Any]:
         """Скачивает аватар чата в память. Пусто — фото нет, это не ошибка."""
@@ -279,6 +302,19 @@ class CommandHandler:
                 "задайте их в настройках аккаунта или в TELEGRAM_API_ID/TELEGRAM_API_HASH"
             )
         return int(raw_id), str(raw_hash)
+
+
+def _plain_details(details: dict[str, Any]) -> dict[str, Any]:
+    """Подробности ошибки для CommandResult.data — только простые значения.
+
+    Результат сериализуется в JSON для Redis: объект в details уронил бы
+    ответ целиком, и API ждал бы до таймаута.
+    """
+    return {
+        key: value
+        for key, value in details.items()
+        if value is None or isinstance(value, str | int | float | bool)
+    }
 
 
 def _user_title(entity: Any) -> str | None:

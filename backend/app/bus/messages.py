@@ -31,6 +31,9 @@ class CommandType(StrEnum):
     SEND_MESSAGE = "SEND_MESSAGE"
     ACCOUNT_INFO = "ACCOUNT_INFO"
     CHAT_PHOTO = "CHAT_PHOTO"
+    # Посты канала от имени аккаунта: чтение (и бэкап) и правка текста.
+    READ_CHANNEL_POSTS = "READ_CHANNEL_POSTS"
+    EDIT_MESSAGE = "EDIT_MESSAGE"
 
 
 class Command(BaseModel):
@@ -62,8 +65,22 @@ class CommandResult(BaseModel):
         return cls(command_id=command_id, ok=True, data=data)
 
     @classmethod
-    def failure(cls, command_id: uuid.UUID, code: str, message: str) -> CommandResult:
-        return cls(command_id=command_id, ok=False, error_code=code, error_message=message)
+    def failure(
+        cls,
+        command_id: uuid.UUID,
+        code: str,
+        message: str,
+        data: dict[str, Any] | None = None,
+    ) -> CommandResult:
+        # data у отказа — машинные подробности (например, seconds у FloodWait),
+        # чтобы вызывающему не пришлось выковыривать их из текста ошибки.
+        return cls(
+            command_id=command_id,
+            ok=False,
+            data=data or {},
+            error_code=code,
+            error_message=message,
+        )
 
 
 class EventType(StrEnum):
