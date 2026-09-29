@@ -11,6 +11,7 @@ interface NotifyStatus {
   group_id: number | null;
   bot_username: string | null;
   last_error: string | null;
+  log_all_matches: boolean;
 }
 
 export function SettingsView() {
@@ -158,6 +159,19 @@ export function SettingsView() {
               className="h-4 w-4 rounded border-ink-600 bg-ink-950"
             />
             Включить уведомления
+          </label>
+          <label
+            className="flex items-center gap-2 text-sm text-slate-300"
+            title="Карточка в лог-чат на каждое сообщение, совпавшее с правилом — даже если ответ не ушёл. Итог (ответили / не удалось / не отправляли и почему) дописывается в ту же карточку."
+          >
+            <input
+              type="checkbox"
+              checked={status?.log_all_matches ?? true}
+              disabled={busy || !status?.configured || !status?.group_id}
+              onChange={(e) => save({ log_all_matches: e.target.checked })}
+              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
+            />
+            Присылать каждое совпадение правила
           </label>
         </div>
 

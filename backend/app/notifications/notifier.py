@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -55,7 +56,13 @@ class NotifierBot:
         resp = await self._client.post(f"{API_BASE}/bot{token}/{method}", json=params)
         data = resp.json()
         if not data.get("ok"):
-            raise NotifyError(data.get("description") or f"Bot API {method} failed")
+            description = data.get("description") or f"Bot API {method} failed"
+            retry_after = (data.get("parameters") or {}).get("retry_after")
+            if data.get("error_code") == 429 or retry_after is not None:
+                # Лимит Telegram (≈20 сообщений в минуту на группу): сколько ждать,
+                # Bot API говорит сам — его и соблюдаем (см. MatchLogReporter).
+                raise NotifyRateLimitError(description, retry_after=float(retry_after or 1))
+            raise NotifyError(description)
         return data["result"]
 
     async def check(self, token: str) -> str:
@@ -207,6 +214,73 @@ class NotifierBot:
         except Exception as exc:  # noqa: BLE001 — уведомление не критично
             logger.warning("notify_failed", detail=str(exc)[:200])
             await self._record_error(db, str(exc)[:300])
+
+    # --- карточки совпадений (MatchLogReporter) -------------------------------
+    async def log_target(self, db: AsyncSession, *, rule_id: uuid.UUID | None) -> LogTarget | None:
+        """Куда слать карточку совпадения правила; None — слать не нужно.
+
+        Та же маршрутизация, что у notify_lead: свой топик правила, если он у
+        правила включён, иначе общий поток «Общение ИИ». None — уведомления
+        выключены/не настроены или выключен сам режим «каждое совпадение».
+        """
+        row = await db.get(NotifySettings, SINGLETON_ID)
+        if row is None or row.log_all_matches is False:
+            return None
+        loaded = await self._load_settings(db)
+        if loaded is None:
+            return None
+        token, group_id = loaded
+        rule = await db.get(Rule, rule_id) if rule_id is not None else None
+        if rule is not None and rule.notify_topic_enabled:
+            thread_id = await self._ensure_topic(db, token, group_id, rule.id, rule.name)
+        else:
+            thread_id = await self._ensure_stream_topic(db, token, group_id)
+        return LogTarget(token=token, group_id=group_id, thread_id=thread_id)
+
+    async def send_log_card(
+        self, target: LogTarget, text: str, *, reply_to: int | None = None
+    ) -> int:
+        """Шлёт карточку (или ответ на неё) и возвращает id сообщения в группе.
+
+        Поднимает NotifyRateLimitError/NotifyError: повтор и учёт лимитов — на
+        стороне MatchLogReporter.
+        """
+        params: dict[str, Any] = {
+            "chat_id": target.group_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        if target.thread_id is not None:
+            params["message_thread_id"] = target.thread_id
+        if reply_to is not None:
+            params["reply_to_message_id"] = reply_to
+            params["allow_sending_without_reply"] = True
+        result = await self._call(target.token, "sendMessage", **params)
+        return int(result["message_id"])
+
+    async def edit_log_card(self, target: LogTarget, message_id: int, text: str) -> None:
+        """Переписывает карточку на месте. «Не изменилось» — не ошибка."""
+        try:
+            await self._call(
+                target.token,
+                "editMessageText",
+                chat_id=target.group_id,
+                message_id=message_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except NotifyRateLimitError:
+            raise
+        except NotifyError as exc:
+            if "message is not modified" in str(exc):
+                return
+            raise
+
+    async def record_error(self, db: AsyncSession, detail: str) -> None:
+        """Последняя ошибка бота — видна в настройках панели."""
+        await self._record_error(db, detail)
 
     async def send_review(self, db: AsyncSession, review: Any) -> None:
         """Шлёт карточку сомнительного ответа с кнопками в топик «на подтверждение».
@@ -407,6 +481,23 @@ class NotifierBot:
 
 class NotifyError(RuntimeError):
     """Ошибка Bot API."""
+
+
+class NotifyRateLimitError(NotifyError):
+    """429 Too Many Requests: Telegram просит подождать retry_after секунд."""
+
+    def __init__(self, message: str, *, retry_after: float) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+@dataclass(frozen=True, slots=True)
+class LogTarget:
+    """Куда шлётся карточка: группа и топик. Токен не попадает в repr/логи."""
+
+    token: str = field(repr=False)
+    group_id: int
+    thread_id: int | None
 
 
 def format_lead_card(

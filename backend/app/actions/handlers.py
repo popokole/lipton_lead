@@ -51,9 +51,8 @@ class ReplyHandler:
     # Пропуски в чаты, собранные из входящих событий: сессия из tdata приходит
     # без кеша сущностей, и отправить по одному id Telethon не сможет.
     peers: PeerCache
-    # Бот-уведомления: шлёт карточку лида в топик сценария. Опционально —
-    # система работает и без отчётного бота.
-    notifier: NotifierBot | None = None
+    # Карточку в лог-чат ответ сам не шлёт: её ведёт MatchLogReporter — одну
+    # на совпадение, с итогом (ответили / нет и почему), без дублей.
 
     async def execute(self, request: ActionRequest, action_id: uuid.UUID) -> ActionResult:
         if not request.reply_text or not request.reply_text.strip():
@@ -91,6 +90,7 @@ class ReplyHandler:
         # Личка — «мягкое» действие: её сбой не отменяет ответ в группе,
         # который уже ушёл. Пишем предупреждение и продолжаем.
         dm_message_id: int | None = None
+        dm_error: str | None = None
         if dm_text and request.message.sender_tg_id is not None:
             sender_peer = self.peers.get_sender(
                 request.account_id, request.message.sender_tg_id
@@ -106,6 +106,7 @@ class ReplyHandler:
                 dm_message_id = dm_sent.tg_message_id
             except (TelegramFloodWaitError, TelegramError) as exc:
                 detail = getattr(exc, "message", str(exc))
+                dm_error = str(detail)
                 logger.warning(
                     "dm_reply_failed",
                     account_id=str(request.account_id),
@@ -132,7 +133,9 @@ class ReplyHandler:
             chat_id=request.message.tg_chat_id,
             tg_message_id=sent.tg_message_id,
         )
-        return ActionResult(status=ActionStatus.SENT, sent_tg_message_id=sent.tg_message_id)
+        return ActionResult(
+            status=ActionStatus.SENT, sent_tg_message_id=sent.tg_message_id, dm_error=dm_error
+        )
 
     async def _record_reply(
         self, request: ActionRequest, tg_message_id: int, *, dm_message_id: int | None = None
@@ -248,45 +251,6 @@ class ReplyHandler:
                         payload={"score": lead.score, "status": lead.status.value},
                     )
                 )
-
-                if self.notifier is not None:
-                    rule_name = None
-                    notify_topic_enabled = False
-                    if request.rule_id is not None:
-                        rule = await db.get(Rule, request.rule_id)
-                        if rule is not None:
-                            rule_name = rule.name
-                            notify_topic_enabled = rule.notify_topic_enabled
-                    card = format_lead_card(
-                        rule_name=rule_name,
-                        account_label=str(request.account_id)[:8],
-                        chat_title=request.message.chat_title,
-                        chat_username=request.message.chat_username,
-                        tg_chat_id=request.message.tg_chat_id,
-                        tg_message_id=request.message.tg_message_id,
-                        is_private=request.message.is_private,
-                        sender_name=request.message.sender_display_name,
-                        sender_username=request.message.sender_username,
-                        sender_tg_id=request.message.sender_tg_id,
-                        incoming_text=request.message.text or "",
-                        reply_text=str(request.payload.get("dm_text") or request.reply_text or ""),
-                        score=lead.score,
-                        status=lead.status.value,
-                    )
-                    await self.notifier.notify_lead(
-                        db,
-                        rule_id=request.rule_id,
-                        rule_name=rule_name,
-                        notify_topic_enabled=notify_topic_enabled,
-                        text=card,
-                    )
-                    # Две общие ленты: все ответы в личке и все в группах.
-                    # Классифицируем по источнику — где пришло сообщение.
-                    await self.notifier.notify_stream(
-                        db,
-                        is_private=request.message.is_private,
-                        text=card,
-                    )
 
 
 @dataclass

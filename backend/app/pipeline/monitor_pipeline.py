@@ -32,6 +32,13 @@ from app.database.repositories.events import EventLogRepository
 from app.database.repositories.messages import MessageRepository
 from app.database.session import Database
 from app.models import EventType, ProcessedStatus, RuleScope
+from app.notifications.match_log import (
+    NO_REPLY_PIPELINE_LINE,
+    STOPLIST_LINE,
+    MatchCard,
+    MatchLogReporter,
+    crash_line,
+)
 from app.pipeline.reply_pipeline import ReplyOutcome, ReplyPipeline
 from app.rules.engine import RuleEngine, RuleMatch
 from app.rules.filters import SelfGuard, StopGuard
@@ -77,6 +84,7 @@ class MonitorPipeline:
         reply_pipeline: ReplyPipeline | None = None,
         peers: PeerCache | None = None,
         stop_guard: StopGuard | None = None,
+        match_log: MatchLogReporter | None = None,
     ) -> None:
         self._settings = settings
         self._database = database
@@ -87,6 +95,9 @@ class MonitorPipeline:
         # Без ReplyPipeline система работает как монитор: правила срабатывают,
         # события пишутся, но ответы не отправляются.
         self._reply = reply_pipeline
+        # Карточка в лог-чат на каждое совпадение (с итогом). Опционально —
+        # без бота-уведомителя конвейер работает как раньше.
+        self._match_log = match_log
         self._normalizer = MessageNormalizer(settings.max_message_length)
         self.peers = peers or PeerCache()
 
@@ -112,6 +123,27 @@ class MonitorPipeline:
                 conv.ab_reply_counted = True
         except Exception as exc:  # noqa: BLE001 — учёт A/B не критичнее обработки
             logger.warning("ab_credit_failed", detail=str(exc)[:150])
+
+    async def _log_stoplisted_match(
+        self, message: NormalizedMessage, chat_id: uuid.UUID, scope: RuleScope
+    ) -> None:
+        """Отправитель в стоп-листе: не отвечаем, но совпадение в лог-чат шлём.
+
+        Правила для такого сообщения прогоняются только ради карточки —
+        статус сообщения, журнал и ответ остаются как раньше (SKIPPED).
+        """
+        if self._match_log is None:
+            return
+        try:
+            matches = await self._rules.match_all(message, chat_id=chat_id, scope=scope)
+        except Exception as exc:  # noqa: BLE001 — карточка не важнее обработки
+            logger.warning("stoplisted_match_check_failed", detail=str(exc)[:150])
+            return
+        if not matches:
+            return
+        card = self._match_log.open_card(message, matches[0])
+        if card is not None:
+            card.report_line(STOPLIST_LINE)
 
     async def handle_event(self, account_id: uuid.UUID, event: Any) -> PipelineOutcome:
         """Точка входа для обработчика Telethon."""
@@ -218,6 +250,8 @@ class MonitorPipeline:
         else:
             if blocked:
                 logger.info("stoplisted_sender_skipped", **message.for_log())
+                if fresh and (message.is_private or chat_monitored):
+                    await self._log_stoplisted_match(message, chat_id, scope)
             elif not fresh:
                 logger.info(
                     "stale_message_stored_no_reply",
@@ -229,24 +263,37 @@ class MonitorPipeline:
         status = ProcessedStatus.MATCHED if matches else ProcessedStatus.SKIPPED
         primary = matches[0] if matches else None
 
-        async with self._database.session() as db:
-            await MessageRepository(db).set_status(
-                message_id, status, rule_id=primary.rule.id if primary else None
-            )
-            if primary is not None:
-                await EventLogRepository(db).add(
-                    EventType.RULE_MATCH,
-                    account_id=message.account_id,
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    rule_id=primary.rule.id,
-                    scenario_id=primary.rule.scenario_id,
-                    extra={
-                        "rule": primary.rule.name,
-                        "terms": list(primary.matched_terms),
-                        "also_matched": [match.rule.name for match in matches[1:]],
-                    },
+        # Карточка в лог-чат — сразу при совпадении, до ответа и независимо от
+        # него: итог допишется в неё ниже (или из отложенной задачи). Сюда
+        # сообщение доходит один раз — claim() выше не пустит повтор, в том
+        # числе от реконсайлера. open_card только ставит задание в очередь.
+        card: MatchCard | None = None
+        if primary is not None and self._match_log is not None:
+            card = self._match_log.open_card(message, primary)
+
+        try:
+            async with self._database.session() as db:
+                await MessageRepository(db).set_status(
+                    message_id, status, rule_id=primary.rule.id if primary else None
                 )
+                if primary is not None:
+                    await EventLogRepository(db).add(
+                        EventType.RULE_MATCH,
+                        account_id=message.account_id,
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        rule_id=primary.rule.id,
+                        scenario_id=primary.rule.scenario_id,
+                        extra={
+                            "rule": primary.rule.name,
+                            "terms": list(primary.matched_terms),
+                            "also_matched": [match.rule.name for match in matches[1:]],
+                        },
+                    )
+        except Exception as exc:
+            # До ответа дело не дошло — карточка не должна висеть «в работе».
+            _report_crash(card, exc)
+            raise
 
         if primary is not None:
             logger.info(
@@ -258,9 +305,17 @@ class MonitorPipeline:
 
         reply_outcome: ReplyOutcome | None = None
         if primary is not None and self._reply is not None:
-            reply_outcome = await self._reply.handle(
-                message, primary, chat_id=chat_id, message_id=message_id
-            )
+            try:
+                reply_outcome = await self._reply.handle(
+                    message, primary, chat_id=chat_id, message_id=message_id, card=card
+                )
+            except Exception as exc:
+                _report_crash(card, exc)
+                raise
+            # Итог — в карточку. Для отложенного ответа это «⏳ через N с»,
+            # итог после паузы допишет его фоновая задача.
+            if card is not None:
+                card.report(reply_outcome)
             # MATCHED — вход в конвейер, а не итог: без этого IGNORE/ESCALATE
             # оставались бы неотличимы от «ещё обрабатывается».
             status = reply_outcome.processed_status
@@ -271,6 +326,8 @@ class MonitorPipeline:
                     await MessageRepository(db).set_status(
                         message_id, status, rule_id=primary.rule.id, reason=reply_outcome.reason
                     )
+        elif card is not None:
+            card.report_line(NO_REPLY_PIPELINE_LINE)
 
         return PipelineOutcome(
             status=status,
@@ -279,3 +336,9 @@ class MonitorPipeline:
             matches=tuple(matches),
             reply=reply_outcome,
         )
+
+
+def _report_crash(card: MatchCard | None, exc: BaseException) -> None:
+    """Обработка упала до итога: в карточку — причина, ответа не было."""
+    if card is not None:
+        card.report_line(crash_line(exc))

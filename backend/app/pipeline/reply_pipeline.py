@@ -25,19 +25,25 @@ cooldown и ДО первой отправки — в фоновой задач�
 паузы (кулдаун, анти-бан лимит чата), удлиняется на её длину: отсчёт идёт от
 реальной отправки, а не от получения сообщения. После паузы ответ
 перепроверяется (см. _revalidate): оператор мог за это время всё отменить.
+
+Карточка совпадения в лог-чате (MatchCard, см. app/notifications/match_log.py)
+приходит в handle() от MonitorPipeline. Итог, который вернул handle(), в неё
+дописывает MonitorPipeline; итог отложенного ответа — фоновая задача, во всех
+своих концовках (отправлено, не отправлено, отменено, упало).
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import html
 import math
 import random
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Select, and_, or_, select
 
@@ -69,6 +75,9 @@ from app.models import (
 from app.rules.engine import CooldownSpec, RuleMatch
 from app.rules.filters import StopGuard
 from app.telegram.messages import NormalizedMessage
+
+if TYPE_CHECKING:
+    from app.notifications.match_log import MatchCard
 
 logger = get_logger(__name__)
 
@@ -120,6 +129,16 @@ class ReplyOutcome:
     action_id: uuid.UUID | None = None
     analysis: AnalysisOutcome | None = None
     validation: ValidationVerdict | None = None
+    # Для карточки в лог-чате (MatchLogReporter): что именно ушло.
+    reply_text: str | None = None
+    dm_text: str | None = None
+    # Ответ в группу ушёл, а личка (режим «чат + лс») — нет.
+    dm_error: str | None = None
+    # Сбой самой ОТПРАВКИ (Telegram, аккаунт не подключён, падение во время
+    # отправки): отличает «не удалось отправить» от «решили не отправлять».
+    send_error: str | None = None
+    # Пауза сценария: через сколько уйдёт (PENDING) или сколько ждали (итог).
+    delay_seconds: float | None = None
 
     @property
     def replied(self) -> bool:
@@ -169,6 +188,9 @@ class _PreparedReply:
     # только если оператор что-то поменял ЗА ВРЕМЯ ожидания (см. _revalidate).
     scenario_enabled: bool = True
     conversation_status: ConversationStatus | None = None
+    # Карточка совпадения в лог-чате: отложенная задача дописывает в неё итог
+    # после паузы (без паузы итог дописывает MonitorPipeline).
+    card: MatchCard | None = None
 
 
 @dataclass(eq=False, slots=True)
@@ -366,7 +388,14 @@ class ReplyPipeline:
         *,
         chat_id: uuid.UUID | None,
         message_id: uuid.UUID | None,
+        card: MatchCard | None = None,
     ) -> ReplyOutcome:
+        """Обрабатывает совпадение и возвращает итог.
+
+        card — карточка совпадения в лог-чате. Итог, который вернул handle(),
+        в неё дописывает вызывающий; итог отложенного ответа (задержка
+        сценария) — фоновая задача, поэтому карточка едет в _PreparedReply.
+        """
         rule = match.rule
 
         if rule.action is not ActionType.REPLY:
@@ -566,6 +595,7 @@ class ReplyPipeline:
                 chat_limit_key=chat_limit_key,
                 analysis=analysis,
                 ab_variant_id=ab_id,
+                card=card,
             )
 
         # Провайдер может отказать: перегрузка агрегатора, таймаут, обрыв сети.
@@ -637,6 +667,7 @@ class ReplyPipeline:
                     one_shot_peer=one_shot_peer,
                     chat_limit_key=chat_limit_key,
                     analysis=analysis,
+                    card=card,
                 )
 
         if generation is None or not generation.has_text or generation.refused:
@@ -665,6 +696,7 @@ class ReplyPipeline:
                     one_shot_peer=one_shot_peer,
                     chat_limit_key=chat_limit_key,
                     analysis=analysis,
+                    card=card,
                 )
             return await self._escalate(
                 message, match, chat_id, message_id, reason, analysis=analysis
@@ -687,6 +719,7 @@ class ReplyPipeline:
             chat_limit_key=chat_limit_key,
             analysis=analysis,
             review=review_mode,
+            card=card,
         )
 
     # --- отправка ----------------------------------------------------------
@@ -708,6 +741,7 @@ class ReplyPipeline:
         ab_variant_id: uuid.UUID | None = None,
         one_shot_peer: int | None = None,
         chat_limit_key: str | None = None,
+        card: MatchCard | None = None,
     ) -> ReplyOutcome:
         verdict = self._validator.validate(
             ValidationContext(
@@ -871,6 +905,7 @@ class ReplyPipeline:
             chat_limit_key=extended_chat_limit_key,
             # До вставки в базу (default ещё не применён) enabled бывает None.
             scenario_enabled=scenario.enabled is not False,
+            card=card,
         )
         if delay > 0:
             return await self._schedule(prepared)
@@ -890,7 +925,7 @@ class ReplyPipeline:
             # модели, и лид уже отработан (анализ прошёл, ответ сгенерирован).
             # Без явной эскалации это молча оседает статусом FAILED и никто,
             # кроме самого оператора, листающего панель, об этом не узнает.
-            return await self._escalate(
+            escalated = await self._escalate(
                 prepared.message,
                 prepared.match,
                 prepared.chat_id,
@@ -900,7 +935,9 @@ class ReplyPipeline:
                 validation=prepared.verdict,
                 conversation_id=prepared.conversation_id,
             )
+            return dataclasses.replace(escalated, send_error=result.detail or result.status.value)
 
+        dm_text = prepared.request.payload.get("dm_text")
         return ReplyOutcome(
             action=ActionType.REPLY,
             status=result.status,
@@ -908,6 +945,10 @@ class ReplyPipeline:
             action_id=result.action_id,
             analysis=prepared.analysis,
             validation=prepared.verdict,
+            reply_text=prepared.request.reply_text,
+            dm_text=str(dm_text) if dm_text else None,
+            dm_error=result.dm_error,
+            delay_seconds=prepared.delay or None,
         )
 
     # --- отложенная отправка (задержка сценария) ---------------------------
@@ -960,6 +1001,7 @@ class ReplyPipeline:
             reason=reason,
             analysis=prepared.analysis,
             validation=prepared.verdict,
+            delay_seconds=prepared.delay,
         )
 
     async def _abandon(self, prepared: _PreparedReply) -> ReplyOutcome:
@@ -1038,6 +1080,7 @@ class ReplyPipeline:
                 "отложенный ответ прерван во время отправки "
                 f"({job.cancel_reason or 'задача отменена'}) — проверьте диалог",
                 release_cooldown=False,
+                send_failed=True,
             )
             raise
         except Exception as exc:
@@ -1046,9 +1089,11 @@ class ReplyPipeline:
                 prepared,
                 f"отложенный ответ упал: {type(exc).__name__}: {exc}",
                 release_cooldown=False,
+                send_failed=True,
             )
             return
 
+        _report(prepared, outcome)
         try:
             await self._set_message_status(prepared, outcome.processed_status, outcome.reason)
         except Exception:
@@ -1109,9 +1154,11 @@ class ReplyPipeline:
                 reason,
                 analysis=prepared.analysis,
             )
+            _report(prepared, outcome)
             await self._set_message_status(prepared, outcome.processed_status, reason)
         except Exception:
             logger.exception("delayed_reply_cleanup_failed", **prepared.message.for_log())
+            _report_line(prepared, f"⏭ Не отправляли: {reason}")
 
     async def _give_up(
         self, prepared: _PreparedReply, reason: str, *, release_cooldown: bool
@@ -1133,14 +1180,28 @@ class ReplyPipeline:
         )
 
     async def _finish_given_up(
-        self, prepared: _PreparedReply, reason: str, *, release_cooldown: bool
+        self,
+        prepared: _PreparedReply,
+        reason: str,
+        *,
+        release_cooldown: bool,
+        send_failed: bool = False,
     ) -> None:
-        """_give_up + итоговый статус сообщения; уборка не должна падать сама."""
+        """_give_up + итоговый статус сообщения; уборка не должна падать сама.
+
+        send_failed — отправка уже началась и сорвалась (в карточке это «не
+        удалось отправить», а не «не отправляли»).
+        """
         try:
             outcome = await self._give_up(prepared, reason, release_cooldown=release_cooldown)
+            if send_failed:
+                outcome = dataclasses.replace(outcome, send_error=reason)
+            _report(prepared, outcome)
             await self._set_message_status(prepared, outcome.processed_status, reason)
         except Exception:
             logger.exception("delayed_reply_cleanup_failed", **prepared.message.for_log())
+            prefix = "❌ Не удалось отправить" if send_failed else "⏭ Не отправляли"
+            _report_line(prepared, f"{prefix}: {reason} · передать оператору не удалось")
 
     def _on_delayed_done(self, task: asyncio.Task[None]) -> None:
         self._delayed.pop(task, None)
@@ -1531,6 +1592,22 @@ def _scenario_settings(scenario: Scenario) -> ScenarioSettings:
         require_grounding=scenario.require_knowledge_grounding,
         reply_in_dm=scenario.reply_in_dm,
     )
+
+
+def _report(prepared: _PreparedReply, outcome: ReplyOutcome) -> None:
+    """Итог отложенного ответа — в карточку совпадения (если она есть).
+
+    MatchCard.report синхронный и исключений не поднимает: карточка в
+    лог-чате не должна ни задерживать, ни ронять ответ.
+    """
+    if prepared.card is not None:
+        prepared.card.report(outcome)
+
+
+def _report_line(prepared: _PreparedReply, line: str) -> None:
+    """Запасной итог, когда ReplyOutcome получить не удалось (уборка упала)."""
+    if prepared.card is not None:
+        prepared.card.report_line(html.escape(line, quote=False))
 
 
 def _one_shot_pending_key(account_id: uuid.UUID, peer_tg_id: int) -> str:

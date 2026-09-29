@@ -51,6 +51,9 @@ class ActionResult:
     action_id: uuid.UUID | None = None
     detail: str | None = None
     sent_tg_message_id: int | None = None
+    # Режим «чат + лс»: ответ в группу ушёл, а личка — нет. Действие при этом
+    # успешно (ответ в чат уже отправлен), но в лог-чате это надо показать.
+    dm_error: str | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -109,6 +112,7 @@ class ActionEngine:
             action_id=action_id,
             detail=result.detail,
             sent_tg_message_id=result.sent_tg_message_id,
+            dm_error=result.dm_error,
         )
 
     async def _persist(self, request: ActionRequest) -> tuple[uuid.UUID, bool]:

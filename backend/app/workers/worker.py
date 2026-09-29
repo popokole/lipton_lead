@@ -51,6 +51,7 @@ from app.core.runtime import VERSION, Runtime
 from app.database.repositories.accounts import AccountRepository
 from app.database.repositories.workers import WorkerRepository
 from app.models import AccountStatus, ActionType, WorkerStatus
+from app.notifications.match_log import MatchLogReporter
 from app.notifications.notifier import NotifierBot
 from app.pipeline.monitor_pipeline import MonitorPipeline
 from app.pipeline.reconcile import ChatReconciler
@@ -108,6 +109,8 @@ class Worker:
         self._pipeline: MonitorPipeline | None = None
         # Отдельная ссылка — ради shutdown(): там живут отложенные ответы.
         self._reply_pipeline: ReplyPipeline | None = None
+        # Очередь карточек совпадений в лог-чат (см. notifications/match_log.py).
+        self._match_log: MatchLogReporter | None = None
         self._reconciler: ChatReconciler | None = None
         self._clients = ClientManager(
             settings,
@@ -170,6 +173,11 @@ class Worker:
         )
         publisher = EventPublisher(redis)
         self._reply_pipeline = self._build_reply_pipeline(publisher, redis)
+        self._match_log = MatchLogReporter(
+            self.runtime.database,
+            self._notifier,
+            tz_offset_hours=settings.work_hours_tz_offset,
+        )
         self._pipeline = MonitorPipeline(
             settings,
             self.runtime.database,
@@ -179,6 +187,7 @@ class Worker:
             reply_pipeline=self._reply_pipeline,
             peers=self._peers,
             stop_guard=self._stop_guard,
+            match_log=self._match_log,
         )
         self._reconciler = ChatReconciler(self.runtime.database, self._clients, self._pipeline)
         self._commands = CommandConsumer(redis, str(self.worker_id))
@@ -220,9 +229,7 @@ class Worker:
         actions = ActionEngine(database)
         actions.register(
             ActionType.REPLY,
-            ReplyHandler(
-                database, self._clients, self._sender, publisher, self._peers, self._notifier
-            ),
+            ReplyHandler(database, self._clients, self._sender, publisher, self._peers),
         )
         actions.register(
             ActionType.REQUEST_REVIEW,
@@ -294,6 +301,12 @@ class Worker:
         if self._reply_pipeline is not None:
             with contextlib.suppress(Exception):
                 await self._reply_pipeline.shutdown()
+        # Карточки совпадений — после отложенных ответов (их итог тоже идёт в
+        # карточку) и до закрытия HTTP-клиента бота: у очереди несколько
+        # секунд, чтобы дойти до конца.
+        if self._match_log is not None:
+            with contextlib.suppress(Exception):
+                await self._match_log.close()
 
         with contextlib.suppress(Exception):
             await self._notifier.close()

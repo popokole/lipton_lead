@@ -45,5 +45,12 @@ class NotifySettings(TimestampMixin, Base):
     # Топик «Дайджест»: ежедневная сводка по лидам.
     digest_topic_id: Mapped[int | None] = mapped_column(TelegramId)
 
+    # Карточка на КАЖДОЕ совпадение правила (а не только на отправленный
+    # ответ): сразу при совпадении, итог — ответили или нет и почему —
+    # дописывается в ту же карточку. Работает при включённых уведомлениях.
+    log_all_matches: Mapped[bool] = mapped_column(
+        sa.Boolean, nullable=False, default=True, server_default=sa.true()
+    )
+
     bot_username: Mapped[str | None] = mapped_column(sa.String(64))
     last_error: Mapped[str | None] = mapped_column(sa.Text)

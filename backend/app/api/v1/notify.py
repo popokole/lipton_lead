@@ -28,12 +28,15 @@ class NotifyStatus(BaseModel):
     group_id: int | None
     bot_username: str | None
     last_error: str | None
+    # Карточка на каждое совпадение правила с итогом (ответили / нет и почему).
+    log_all_matches: bool
 
 
 class NotifyUpdate(BaseModel):
     bot_token: str | None = Field(default=None, max_length=128)
     group_id: int | None = None
     enabled: bool | None = None
+    log_all_matches: bool | None = None
 
 
 async def _get_or_create(db: DbDep) -> NotifySettings:
@@ -52,6 +55,7 @@ def _status(row: NotifySettings) -> NotifyStatus:
         group_id=row.group_id,
         bot_username=row.bot_username,
         last_error=row.last_error,
+        log_all_matches=row.log_all_matches is not False,
     )
 
 
@@ -89,6 +93,8 @@ async def update_notify(
         row.group_id = payload.group_id
     if payload.enabled is not None:
         row.enabled = payload.enabled
+    if payload.log_all_matches is not None:
+        row.log_all_matches = payload.log_all_matches
 
     await db.flush()
     return _status(row)

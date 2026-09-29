@@ -327,6 +327,7 @@ async def send(
     chat_id: uuid.UUID | None = None,
     conversation_id: uuid.UUID | None = None,
     chat_limit: bool = False,
+    card: Any = None,
 ) -> Sent:
     """Ответ, прошедший анализ и генерацию: вход в стадию отправки.
 
@@ -363,6 +364,7 @@ async def send(
         review=review,
         one_shot_peer=one_shot_peer,
         chat_limit_key=key,
+        card=card,
     )
     return Sent(outcome, message_id, match)
 
