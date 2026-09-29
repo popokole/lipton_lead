@@ -14,18 +14,29 @@
     python -m app.tools.channel_posts edit --account "Основной" --chat @my_channel \\
         --plan /tmp/plan.json --apply
 
-План — JSON-список {"id": <id поста>, "text": "<новый текст>"}; подойдёт и файл
-из read (берётся его список posts). Посты с тем же текстом пропускаются.
+План — JSON-список {"id": <id поста>, "text": "<новый текст>"}. Необязательно:
+"html" — новый текст в HTML (уходит с parse_mode=html вместо text),
+"parse_mode" — html | md | none для text этого элемента (иначе --parse-mode),
+"link_preview" — true/false для этого поста.
+
+Файл из read и бэкап тоже годятся как план: у поста с форматированием уходит
+поле html, у остальных — text как простой текст. Поэтому текст поста с
+форматированием правят в поле html, а бэкап восстанавливается одной командой
+(edit --plan channel_backup_<время>.json --apply). Посты, текст которых не
+изменился, пропускаются — их форматирование не трогается.
 
 Сам CLI в Telegram не ходит: сессия аккаунта живёт только в воркере, и второе
 подключение той же сессии разлогинит аккаунт. Команды READ_CHANNEL_POSTS и
-EDIT_MESSAGE уходят воркеру через шину — так же, как у API.
+EDIT_MESSAGE уходят воркеру через шину — так же, как у API. Канал ищется по
+--chat один раз, дальше команды адресуют его помеченным id (-100…): повторный
+поиск по @username на каждую правку — прямой путь к FloodWait на часы.
 
 Перед --apply CLI сам сохраняет свежий бэкап текущих текстов правимых постов
 (channel_backup_<время>.json) и по итогу пишет результаты в JSON. Правки идут
 по одной с паузой и останавливаются на первой ошибке, которую нет смысла
-повторять. Повторяются только таймаут ответа воркера (правка идемпотентна) и
-FloodWait не длиннее --max-flood-wait.
+повторять. Повторяется только FloodWait не длиннее --max-flood-wait. Если
+воркер не ответил на правку вовремя, команда повторно не отправляется: CLI
+перечитывает пост и по нему решает, применилась ли правка.
 """
 
 from __future__ import annotations
@@ -58,9 +69,10 @@ from app.models import Account
 from app.telegram.channel_posts import (
     READ_LIMIT_MAX,
     TEXT_LIMIT,
+    entity_signature,
     length_limit,
     normalize_chat_reference,
-    render_text,
+    render_entities,
     utf16_length,
 )
 from app.workers.lease import AccountLease
@@ -69,16 +81,27 @@ Caller = Callable[[Command, float], Awaitable[CommandResult]]
 Echo = Callable[[str], None]
 Sleep = Callable[[float], Awaitable[None]]
 Clock = Callable[[], datetime]
+ChatRef = str | int
 
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_INVALID = 2
 
-# Чтение 500 постов — несколько запросов к Telegram; правка — до 31 с
-# FloodWait внутри воркера плюс сами запросы.
+# Чтение 500 постов — несколько запросов к Telegram.
 READ_TIMEOUT_SECONDS = 120.0
+# Воркер тратит на правку до трёх запросов к Telegram и не больше одного
+# FloodWait ≤ 30 с. Начать правку позже EDIT_EXPIRY_SECONDS после отправки
+# команды он откажется (expires_at), так что к таймауту CLI команда либо уже
+# выполнена, либо не будет выполнена никогда. Исключение — запрос, застрявший
+# в сети: его исход CLI узнаёт, перечитав пост (команды воркер выполняет по
+# одной, поэтому чтение встанет в очередь после правки), а не повторной
+# отправкой.
+EDIT_EXPIRY_SECONDS = 60.0
 EDIT_TIMEOUT_SECONDS = 120.0
 DEFAULT_PAGE_SIZE = 100
+# Telethon сам делает паузу 1 с между запросами при выгрузке больших историй:
+# так Telegram реже отвечает FloodWait.
+DEFAULT_PAGE_PAUSE_SECONDS = 1.0
 DEFAULT_PAUSE_SECONDS = 4.0
 DEFAULT_MAX_FLOOD_WAIT = 120
 IDS_PER_REQUEST = 100
@@ -89,6 +112,14 @@ STATUS_OK = "ok"
 STATUS_NO_CHANGE = "no_change"
 STATUS_ERROR = "error"
 _STATUS_LABELS = {STATUS_OK: "OK", STATUS_NO_CHANGE: "БЕЗ ИЗМЕНЕНИЙ", STATUS_ERROR: "ОШИБКА"}
+# После этих исходов правки дальше не идём.
+_STOP_STATUSES = frozenset({"failed", "unknown"})
+_CHAT_TYPES = {
+    "channel": "канал",
+    "supergroup": "супергруппа",
+    "group": "группа",
+    "user": "пользователь",
+}
 
 
 class CliError(Exception):
@@ -116,8 +147,24 @@ class CommandFailedError(Exception):
 # --- план правок -------------------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class PlanItem:
+    """Элемент плана.
+
+    html — новый текст в HTML: если он есть, уходит он (с parse_mode=html), а
+    text служит только для сверки. parse_mode при mode_set=True — разметка
+    text именно этого элемента, иначе берётся --parse-mode. link_preview —
+    превью ссылки для этого поста; None — как задано опцией или как сейчас.
+    """
+
     id: int
-    text: str
+    text: str | None
+    html: str | None = None
+    parse_mode: str | None = None
+    mode_set: bool = False
+    link_preview: bool | None = None
+
+
+_DOCUMENT_KINDS = frozenset({"channel_posts", "channel_backup"})
+_PLAN_PARSE_MODES: dict[str, str | None] = {"html": "html", "md": "md", "none": None}
 
 
 def load_plan(path: Path) -> list[PlanItem]:
@@ -132,7 +179,13 @@ def load_plan(path: Path) -> list[PlanItem]:
 
 
 def parse_plan(raw: Any) -> list[PlanItem]:
-    """Проверяет план: непустой список {id, text}, id — уникальные положительные."""
+    """Проверяет план: непустой список {id, text | html, parse_mode?, link_preview?}.
+
+    id — уникальные положительные. В файле выгрузки или бэкапе text — ровно
+    то, что сейчас в посте, то есть простой текст, а не разметка: поэтому для
+    таких файлов parse_mode элементов по умолчанию — «без разметки».
+    """
+    document = isinstance(raw, dict) and raw.get("kind") in _DOCUMENT_KINDS
     items = raw.get("posts") if isinstance(raw, dict) else raw
     if not isinstance(items, list) or not items:
         raise PlanError('План должен быть непустым JSON-списком объектов {"id": ..., "text": ...}')
@@ -146,21 +199,53 @@ def parse_plan(raw: Any) -> list[PlanItem]:
             problems.append(f"{where}: ожидается объект {{id, text}}")
             continue
         post_id = item.get("id")
-        text = item.get("text")
         if isinstance(post_id, bool) or not isinstance(post_id, int) or post_id <= 0:
             problems.append(f"{where}: id должен быть положительным целым, а не {post_id!r}")
             continue
-        if not isinstance(text, str):
-            problems.append(f"{where} (id {post_id}): text должен быть строкой")
+        problem = _item_problem(item)
+        if problem is not None:
+            problems.append(f"{where} (id {post_id}): {problem}")
             continue
         if post_id in seen:
             problems.append(f"{where}: id {post_id} встречается в плане повторно")
             continue
         seen.add(post_id)
-        plan.append(PlanItem(id=post_id, text=text))
+        plan.append(_plan_item(post_id, item, document=document))
     if problems:
         raise PlanError("\n".join(problems))
     return plan
+
+
+def _item_problem(item: dict[str, Any]) -> str | None:
+    text, html = item.get("text"), item.get("html")
+    if text is not None and not isinstance(text, str):
+        return "text должен быть строкой"
+    if html is not None and not isinstance(html, str):
+        return "html должен быть строкой"
+    if text is None and html is None:
+        return "text должен быть строкой (или задайте html)"
+    if "parse_mode" in item:
+        mode = item["parse_mode"]
+        if mode is not None and not (isinstance(mode, str) and mode in _PLAN_PARSE_MODES):
+            return "parse_mode должен быть html, md, none или null"
+    preview = item.get("link_preview")
+    if preview is not None and not isinstance(preview, bool):
+        return "link_preview должен быть true или false"
+    return None
+
+
+def _plan_item(post_id: int, item: dict[str, Any], *, document: bool) -> PlanItem:
+    mode_set = "parse_mode" in item
+    mode = item.get("parse_mode")
+    parse_mode = _PLAN_PARSE_MODES[mode] if isinstance(mode, str) else None
+    return PlanItem(
+        id=post_id,
+        text=item.get("text"),
+        html=item.get("html"),
+        parse_mode=parse_mode,
+        mode_set=mode_set or document,
+        link_preview=item.get("link_preview"),
+    )
 
 
 # --- проверка правки ---------------------------------------------------------
@@ -175,18 +260,30 @@ class ItemCheck:
     summary: str = ""
     problems: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Что и как уйдёт воркеру; expected_text — текст поста после правки.
+    send_text: str = ""
+    send_mode: str | None = None
+    send_link_preview: bool = False
+    expected_text: str = ""
 
 
-def check_item(item: PlanItem, current: dict[str, Any] | None, parse_mode: str | None) -> ItemCheck:
+def check_item(
+    item: PlanItem,
+    current: dict[str, Any] | None,
+    parse_mode: str | None = None,
+    link_preview: bool | None = None,
+) -> ItemCheck:
     """Сверяет новый текст с текущим постом: лимиты, права, есть ли что менять."""
+    send_text, send_mode, source_problems = _outgoing(item, current, parse_mode)
     try:
-        new_plain, new_entities = render_text(item.text, parse_mode)
+        new_plain, new_entities = render_entities(send_text, send_mode)
     except AppError as exc:
-        return ItemCheck(item.id, STATUS_ERROR, None, problems=[exc.message])
+        return ItemCheck(item.id, STATUS_ERROR, None, problems=[*source_problems, exc.message])
+    formatting = entity_signature(new_entities)
     new_length = utf16_length(new_plain)
 
     if current is None:
-        problems = ["поста нет в канале (удалён, служебный или неверный id)"]
+        problems = ["поста нет в канале (удалён, служебный или неверный id)", *source_problems]
         if new_length > TEXT_LIMIT:
             problems.append(f"текст {new_length} символов — больше лимита {TEXT_LIMIT}")
         return ItemCheck(item.id, STATUS_ERROR, new_length, problems=problems)
@@ -201,7 +298,12 @@ def check_item(item: PlanItem, current: dict[str, Any] | None, parse_mode: str |
         old_length=int(current.get("length", utf16_length(old_text))),
         limit=limit,
         media_type=current.get("media_type"),
+        send_text=send_text,
+        send_mode=send_mode,
+        send_link_preview=_effective_preview(item, current, link_preview),
+        expected_text=new_plain,
     )
+    check.problems.extend(source_problems)
 
     if new_length > limit:
         what = "подпись к медиа" if has_media else "текст"
@@ -213,14 +315,17 @@ def check_item(item: PlanItem, current: dict[str, Any] | None, parse_mode: str |
             "аккаунт не может править этот пост (нужно право «Редактировать сообщения»)"
         )
 
-    unchanged = _same_as_current(item.text, new_plain, new_entities, current, parse_mode)
-    if not unchanged and parse_mode is None and current.get("formatting_present"):
-        check.warnings.append(
-            "у поста есть форматирование — без --parse-mode html оно пропадёт "
-            "(HTML текущей версии — в поле html выгрузки)"
+    unchanged = _same_as_current(item, send_text, new_plain, formatting, current)
+    if unchanged:
+        check.summary = "текст тот же"
+    else:
+        check.warnings.extend(_warnings(item, formatting, current, check.send_link_preview))
+        check.summary = (
+            "текст тот же, меняется форматирование"
+            if new_plain == old_text
+            else diff_summary(old_text, new_plain)
         )
 
-    check.summary = "текст тот же" if unchanged else diff_summary(old_text, new_plain)
     if check.problems:
         check.status = STATUS_ERROR
     elif unchanged:
@@ -228,17 +333,96 @@ def check_item(item: PlanItem, current: dict[str, Any] | None, parse_mode: str |
     return check
 
 
+def _outgoing(
+    item: PlanItem, current: dict[str, Any] | None, default_mode: str | None
+) -> tuple[str, str | None, list[str]]:
+    """Текст и разметка, которые уйдут воркеру, и противоречия в элементе."""
+    if item.html is not None:
+        return item.html, "html", _html_conflicts(item, current)
+    if item.mode_set:
+        return item.text or "", item.parse_mode, []
+    return item.text or "", default_mode, []
+
+
+def _html_conflicts(item: PlanItem, current: dict[str, Any] | None) -> list[str]:
+    """В элементе и text, и html: уходит html, поэтому правка одного text потерялась бы."""
+    if item.text is None or item.html is None or current is None:
+        return []
+    if item.text == current.get("text"):
+        return []
+    if item.html == current.get("html"):
+        return [
+            "изменено поле text, а поле html — нет; у поста есть форматирование, и в "
+            "канал уходит html: впишите новый текст в html или удалите поле html, "
+            "чтобы отправить text без форматирования"
+        ]
+    try:
+        plain, _entities = render_entities(item.html, "html")
+    except AppError:
+        return []  # ошибку разбора html покажет check_item
+    if plain != item.text:
+        return ["text и html расходятся — правьте что-то одно (в канал уходит html)"]
+    return []
+
+
 def _same_as_current(
-    text: str,
-    plain: str,
-    entity_count: int,
+    item: PlanItem,
+    send_text: str,
+    new_plain: str,
+    formatting: list[tuple[str, int, int, str]],
     current: dict[str, Any],
-    parse_mode: str | None,
 ) -> bool:
-    if entity_count == 0 and not current.get("formatting_present"):
-        return plain == current.get("text")
+    if item.html is not None and send_text == current.get("html"):
+        return True
+    if new_plain != current.get("text"):
+        return False
+    if not formatting:
+        # Текст тот же, а своего форматирования план не задаёт — пост не
+        # трогаем, даже если в нём есть форматирование: правка простым
+        # текстом его бы стёрла.
+        return True
+    return formatting == _current_formatting(current)
+
+
+def _current_formatting(current: dict[str, Any]) -> list[tuple[str, int, int, str]] | None:
     html = current.get("html")
-    return parse_mode == "html" and html is not None and text == html
+    if not html:
+        return []
+    try:
+        _plain, entities = render_entities(str(html), "html")
+    except AppError:
+        return None
+    return entity_signature(entities)
+
+
+def _warnings(
+    item: PlanItem,
+    formatting: list[tuple[str, int, int, str]],
+    current: dict[str, Any],
+    link_preview: bool,
+) -> list[str]:
+    warnings: list[str] = []
+    if not formatting and current.get("formatting_present"):
+        warnings.append(
+            "у поста есть форматирование — простым текстом оно пропадёт (чтобы "
+            "сохранить, правьте поле html выгрузки или пишите HTML с --parse-mode html)"
+        )
+    if item.html is not None and current.get("html_lossless") is False:
+        warnings.append(
+            "HTML этого поста в выгрузке неточный — часть форматирования при правке пропадёт"
+        )
+    if current.get("media_type") == "webpage" and not link_preview:
+        warnings.append("превью ссылки у поста будет удалено (link_preview выключен)")
+    return warnings
+
+
+def _effective_preview(item: PlanItem, current: dict[str, Any], option: bool | None) -> bool:
+    if item.link_preview is not None:
+        return item.link_preview
+    if option is not None:
+        return option
+    # По умолчанию — как сейчас: превью есть, только если оно есть у поста.
+    return current.get("media_type") == "webpage"
 
 
 def diff_summary(old: str, new: str) -> str:
@@ -302,13 +486,27 @@ async def call_ok(caller: Caller, command: Command, timeout_seconds: float) -> d
     return dict(result.data)
 
 
+def chat_target(chat_info: dict[str, Any] | None, fallback: ChatRef) -> ChatRef:
+    """Чем адресовать канал в следующих командах.
+
+    Воркер отдаёт помеченный id канала (-100…): по нему кеш сессии находит
+    канал без запросов к Telegram, тогда как @username или ссылка-приглашение
+    в каждой команде — это лишний ResolveUsername/CheckChatInvite.
+    """
+    chat_id = (chat_info or {}).get("id")
+    if isinstance(chat_id, int) and not isinstance(chat_id, bool) and chat_id < 0:
+        return chat_id
+    return fallback
+
+
 async def read_by_ids(
-    caller: Caller, account_id: uuid.UUID, chat: str, ids: Sequence[int]
+    caller: Caller, account_id: uuid.UUID, chat: ChatRef, ids: Sequence[int]
 ) -> dict[str, Any]:
     """Текущие версии конкретных постов — для проверки плана и бэкапа."""
     posts: list[dict[str, Any]] = []
     missing: list[int] = []
     chat_info: dict[str, Any] | None = None
+    target = chat
     for start in range(0, len(ids), IDS_PER_REQUEST):
         chunk = list(ids[start : start + IDS_PER_REQUEST])
         data = await call_ok(
@@ -316,15 +514,16 @@ async def read_by_ids(
             Command(
                 type=CommandType.READ_CHANNEL_POSTS,
                 account_id=account_id,
-                payload={"chat": chat, "ids": chunk},
+                payload={"chat": target, "ids": chunk},
             ),
             READ_TIMEOUT_SECONDS,
         )
         chat_info = data.get("chat") or chat_info
+        target = chat_target(chat_info, target)
         posts.extend(data.get("posts") or [])
         missing.extend(data.get("missing_ids") or [])
     posts.sort(key=lambda post: int(post["id"]))
-    return {"chat": chat_info, "posts": posts, "missing_ids": missing}
+    return {"chat": chat_info, "target": target, "posts": posts, "missing_ids": missing}
 
 
 def write_json(path: Path, document: dict[str, Any]) -> None:
@@ -338,6 +537,16 @@ def _stamp(moment: datetime) -> str:
     return moment.strftime("%Y%m%d_%H%M%S")
 
 
+def _flood_seconds(code: str | None, data: dict[str, Any], message: str | None) -> int | None:
+    if code != "telegram_flood_wait":
+        return None
+    seconds = data.get("seconds")
+    if isinstance(seconds, int) and not isinstance(seconds, bool):
+        return seconds
+    match = re.search(r"(\d+)", message or "")
+    return int(match.group(1)) if match else None
+
+
 # --- read --------------------------------------------------------------------
 async def run_read(
     caller: Caller,
@@ -347,30 +556,39 @@ async def run_read(
     out_path: Path,
     limit: int | None = None,
     page_size: int = DEFAULT_PAGE_SIZE,
+    page_pause: float = DEFAULT_PAGE_PAUSE_SECONDS,
+    max_flood_wait: int = DEFAULT_MAX_FLOOD_WAIT,
     echo: Echo = print,
+    sleep: Sleep = asyncio.sleep,
     now: Clock = utcnow,
 ) -> int:
-    """Выгружает посты (последние limit или все) от старых к новым в JSON."""
+    """Выгружает посты (последние limit или все) от старых к новым в JSON.
+
+    Сбой посреди выгрузки не теряет уже прочитанное: файл пишется с
+    partial=true и причиной.
+    """
     collected: dict[int, dict[str, Any]] = {}
     chat_info: dict[str, Any] | None = None
+    target: ChatRef = chat
     skipped = 0
     offset = 0
     partial: dict[str, Any] | None = None
 
-    for _page in range(MAX_PAGES):
+    for page in range(MAX_PAGES):
         want = page_size if limit is None else min(page_size, limit - len(collected))
         if want <= 0:
             break
-        data = await call_ok(
-            caller,
-            Command(
-                type=CommandType.READ_CHANNEL_POSTS,
-                account_id=account_id,
-                payload={"chat": chat, "limit": want, "offset_id": offset},
-            ),
-            READ_TIMEOUT_SECONDS,
-        )
+        if page and page_pause > 0:
+            await sleep(page_pause)
+        try:
+            data = await _read_page(
+                caller, account_id, target, want, offset, max_flood_wait, echo, sleep
+            )
+        except (CommandFailedError, AppError) as exc:
+            partial = {"offset_id": offset, "code": exc.code, "detail": exc.message}
+            break
         chat_info = data.get("chat") or chat_info
+        target = chat_target(chat_info, target)
         skipped += int(data.get("skipped_service") or 0)
         for post in data.get("posts") or []:
             collected[int(post["id"])] = post
@@ -382,6 +600,10 @@ async def run_read(
         if next_offset is None or (offset and int(next_offset) >= offset):
             break
         offset = int(next_offset)
+
+    if partial is not None and not collected:
+        echo(f"Ошибка: ничего не прочитано — {_partial_reason(partial)}")
+        return EXIT_FAILED
 
     posts = sorted(collected.values(), key=lambda post: int(post["id"]))
     if limit is not None and len(posts) > limit:
@@ -410,18 +632,57 @@ async def run_read(
     echo(f"Сохранено: {out_path}")
     if partial is not None:
         echo(
-            "ВНИМАНИЕ: выгрузка неполная — Telegram/Telethon не отдал очередную "
-            f"пачку (старше id {partial.get('offset_id')}): {partial.get('detail', '')}"
+            "ВНИМАНИЕ: выгрузка неполная — очередная пачка (старше id "
+            f"{partial.get('offset_id')}) не прочиталась: {_partial_reason(partial)}"
         )
         return EXIT_FAILED
     return EXIT_OK
 
 
-def _chat_title(chat_info: dict[str, Any] | None, chat: str) -> str:
+async def _read_page(
+    caller: Caller,
+    account_id: uuid.UUID,
+    target: ChatRef,
+    want: int,
+    offset: int,
+    max_flood_wait: int,
+    echo: Echo,
+    sleep: Sleep,
+) -> dict[str, Any]:
+    """Одна страница выгрузки; FloodWait не длиннее max_flood_wait пережидаем один раз."""
+    payload = {"chat": target, "limit": want, "offset_id": offset}
+    for attempt in (1, 2):
+        command = Command(
+            type=CommandType.READ_CHANNEL_POSTS, account_id=account_id, payload=payload
+        )
+        try:
+            return await call_ok(caller, command, READ_TIMEOUT_SECONDS)
+        except CommandFailedError as exc:
+            seconds = _flood_seconds(exc.code, exc.data, exc.message)
+            if attempt == 2 or seconds is None or seconds > max_flood_wait:
+                raise
+            echo(f"Telegram просит подождать {seconds} с — жду и продолжаю выгрузку")
+            await sleep(seconds + 1)
+    raise AssertionError("unreachable")  # pragma: no cover — цикл выше всегда выходит
+
+
+def _partial_reason(partial: dict[str, Any]) -> str:
+    code = partial.get("code")
+    detail = partial.get("detail", "")
+    return f"{code}: {detail}" if code else str(detail)
+
+
+def _chat_title(chat_info: dict[str, Any] | None, chat: ChatRef) -> str:
     if not chat_info:
-        return chat
-    username = f"@{chat_info['username']}, " if chat_info.get("username") else ""
-    return f"{chat_info.get('title') or chat} ({username}id {chat_info.get('id')})"
+        return str(chat)
+    details: list[str] = []
+    if chat_info.get("username"):
+        details.append(f"@{chat_info['username']}")
+    kind = chat_info.get("type")
+    if kind:
+        details.append(_CHAT_TYPES.get(str(kind), str(kind)))
+    details.append(f"id {chat_info.get('id')}")
+    return f"{chat_info.get('title') or chat} ({', '.join(details)})"
 
 
 def _post_line(post: dict[str, Any]) -> str:
@@ -430,6 +691,8 @@ def _post_line(post: dict[str, Any]) -> str:
     flags = []
     if post.get("formatting_present"):
         flags.append("формат")
+    if post.get("html_lossless") is False:
+        flags.append("html-неточный")
     if post.get("grouped_id"):
         flags.append("альбом")
     if post.get("can_edit") is False:
@@ -442,7 +705,8 @@ def _post_line(post: dict[str, Any]) -> str:
 @dataclass(frozen=True, slots=True)
 class EditOptions:
     parse_mode: str | None = None
-    link_preview: bool = False
+    # None — превью как сейчас у каждого поста; True/False — для всех.
+    link_preview: bool | None = None
     apply: bool = False
     pause_seconds: float = DEFAULT_PAUSE_SECONDS
     max_flood_wait: int = DEFAULT_MAX_FLOOD_WAIT
@@ -464,14 +728,19 @@ async def run_edit(
     """Dry-run по умолчанию; с options.apply — бэкап, затем правки по одной."""
     ids = [item.id for item in plan]
     current = await read_by_ids(caller, account_id, chat, ids)
+    target: ChatRef = current["target"]
     by_id = {int(post["id"]): post for post in current["posts"]}
-    checks = [check_item(item, by_id.get(item.id), options.parse_mode) for item in plan]
+    checks = [
+        check_item(item, by_id.get(item.id), options.parse_mode, options.link_preview)
+        for item in plan
+    ]
 
     mode = "ПРАВКА (--apply)" if options.apply else "ПРОВЕРКА (dry-run)"
     echo(f"Чат: {_chat_title(current['chat'], chat)} — {mode}")
     echo(
-        f"parse_mode: {options.parse_mode or 'нет (простой текст)'}, "
-        f"превью ссылок: {'да' if options.link_preview else 'нет'}"
+        f"parse_mode: {options.parse_mode or 'нет (простой текст)'} "
+        "(элементы с html уходят как html), "
+        f"превью ссылок: {_preview_label(options.link_preview)}"
     )
     for check in checks:
         for line in format_check(check):
@@ -525,6 +794,7 @@ async def run_edit(
         },
     )
     echo(f"Бэкап текущих текстов: {backup_path}")
+    echo(f"Откат: edit --plan {backup_path} --apply")
 
     results_path = options.results_path or (
         options.backup_dir / f"channel_edit_results_{stamp}.json"
@@ -533,7 +803,7 @@ async def run_edit(
         item.id: _row(item, check, _initial_status(check))
         for item, check in zip(plan, checks, strict=True)
     }
-    failed: dict[str, Any] | None = None
+    stopped: dict[str, Any] | None = None
     edits_done = 0
     try:
         for item, check in zip(plan, checks, strict=True):
@@ -545,13 +815,13 @@ async def run_edit(
             # «неизвестно», а не «не трогали».
             rows[item.id] = {**rows[item.id], "status": "in_flight"}
             row = await _edit_one(
-                caller, account_id, chat, item, rows[item.id], options, echo, sleep
+                caller, account_id, target, item, check, rows[item.id], options, echo, sleep, now
             )
             edits_done += 1
             rows[item.id] = row
             echo(_progress_line(row, edits_done, to_edit))
-            if row["status"] == "failed":
-                failed = row
+            if row["status"] in _STOP_STATUSES:
+                stopped = row
                 break
     finally:
         # Файл результатов пишется при любом исходе, в том числе при Ctrl+C:
@@ -565,55 +835,72 @@ async def run_edit(
         echo("Результат: " + ", ".join(f"{key} {value}" for key, value in sorted(summary.items())))
         echo(f"Результаты: {results_path}")
 
-    if failed is not None:
-        echo(
-            f"Остановлено на посте #{failed['id']}: {failed.get('error_code')}: "
-            f"{failed.get('error_message')}. Остальные не тронуты."
-        )
+    if stopped is not None:
+        if stopped["status"] == "unknown":
+            echo(
+                f"Остановлено на посте #{stopped['id']}: исход правки неизвестен — "
+                f"{stopped.get('error_message')}. Следующие посты не тронуты."
+            )
+        else:
+            echo(
+                f"Остановлено на посте #{stopped['id']}: {stopped.get('error_code')}: "
+                f"{stopped.get('error_message')}. Остальные не тронуты."
+            )
         return EXIT_FAILED
     return EXIT_OK
+
+
+def _preview_label(option: bool | None) -> str:
+    if option is None:
+        return "как сейчас у поста"
+    return "да" if option else "нет"
 
 
 async def _edit_one(
     caller: Caller,
     account_id: uuid.UUID,
-    chat: str,
+    target: ChatRef,
     item: PlanItem,
+    check: ItemCheck,
     row: dict[str, Any],
     options: EditOptions,
     echo: Echo,
     sleep: Sleep,
+    now: Clock,
 ) -> dict[str, Any]:
-    payload = {
-        "chat": chat,
-        "message_id": item.id,
-        "text": item.text,
-        "parse_mode": options.parse_mode,
-        "link_preview": options.link_preview,
-    }
     waited = 0
-    timed_out = False
     for attempt in (1, 2):
+        payload = {
+            "chat": target,
+            "message_id": item.id,
+            "text": check.send_text,
+            "parse_mode": check.send_mode,
+            "link_preview": check.send_link_preview,
+            # Позже этого воркер правку не начнёт: CLI к тому времени может
+            # перестать ждать, и «тихая» правка потом исказила бы результаты.
+            "expires_at": now().timestamp() + EDIT_EXPIRY_SECONDS,
+        }
         command = Command(type=CommandType.EDIT_MESSAGE, account_id=account_id, payload=payload)
         try:
             result = await caller(command, EDIT_TIMEOUT_SECONDS)
-        except CommandTimeoutError as exc:
-            if attempt == 1:
-                echo(f"    #{item.id}: воркер не ответил вовремя — повторяю (правка идемпотентна)")
-                timed_out = True
-                continue
-            return _failed(row, exc.code, exc.message, waited)
+        except CommandTimeoutError:
+            echo(
+                f"    #{item.id}: воркер не ответил за {EDIT_TIMEOUT_SECONDS:.0f} с — "
+                "перечитываю пост; повторно правку не отправляю"
+            )
+            return await _verify_after_timeout(
+                caller, account_id, target, item, check, {**row, "flood_waited": waited}, echo
+            )
         except AppError as exc:
             return _failed(row, exc.code, exc.message, waited)
 
         if result.ok:
             no_change = bool(result.data.get("no_change"))
-            # Повтор после таймаута видит уже применённую первой попыткой правку.
-            status = "edited" if (not no_change or timed_out) else "no_change"
             waited += int(result.data.get("flood_waited") or 0)
+            status = "no_change" if no_change else "edited"
             return {**row, "status": status, "flood_waited": waited}
 
-        seconds = _flood_seconds(result)
+        seconds = _flood_seconds(result.error_code, result.data, result.error_message)
         if attempt == 1 and seconds is not None and seconds <= options.max_flood_wait:
             echo(f"    #{item.id}: Telegram просит подождать {seconds} с — жду и повторяю")
             waited += seconds
@@ -626,18 +913,43 @@ async def _edit_one(
     return _failed(row, "retries_exhausted", "Повторы исчерпаны", waited)  # pragma: no cover
 
 
+async def _verify_after_timeout(
+    caller: Caller,
+    account_id: uuid.UUID,
+    target: ChatRef,
+    item: PlanItem,
+    check: ItemCheck,
+    row: dict[str, Any],
+    echo: Echo,
+) -> dict[str, Any]:
+    """Правка без ответа: применилась ли она, узнаём по самому посту."""
+    command = Command(
+        type=CommandType.READ_CHANNEL_POSTS,
+        account_id=account_id,
+        payload={"chat": target, "ids": [item.id]},
+    )
+    try:
+        data = await call_ok(caller, command, READ_TIMEOUT_SECONDS)
+    except (CommandFailedError, AppError) as exc:
+        return _unknown(
+            row,
+            "воркер не ответил на правку, а перечитать пост не удалось "
+            f"({exc.code}) — правка могла примениться, проверьте пост",
+        )
+    posts = [post for post in data.get("posts") or [] if post.get("id") == item.id]
+    if posts and posts[0].get("text") == check.expected_text:
+        echo(f"    #{item.id}: в канале уже новый текст — правка применена")
+        return {**row, "status": "edited", "verified_after_timeout": True}
+    return _unknown(
+        row,
+        "воркер не ответил на правку, и в канале прежний текст — скорее всего, правка "
+        "не применена (просроченную команду воркер отклонит); проверьте пост и "
+        "запустите план снова",
+    )
+
+
 def _initial_status(check: ItemCheck) -> str:
     return "skipped_unchanged" if check.status == STATUS_NO_CHANGE else "not_attempted"
-
-
-def _flood_seconds(result: CommandResult) -> int | None:
-    if result.error_code != "telegram_flood_wait":
-        return None
-    seconds = result.data.get("seconds")
-    if isinstance(seconds, int) and not isinstance(seconds, bool):
-        return seconds
-    match = re.search(r"(\d+)", result.error_message or "")
-    return int(match.group(1)) if match else None
 
 
 def _row(item: PlanItem, check: ItemCheck, status: str) -> dict[str, Any]:
@@ -647,6 +959,7 @@ def _row(item: PlanItem, check: ItemCheck, status: str) -> dict[str, Any]:
         "old_length": check.old_length,
         "new_length": check.new_length,
         "media_type": check.media_type,
+        "parse_mode": check.send_mode,
         "problems": list(check.problems),
         "warnings": list(check.warnings),
     }
@@ -662,10 +975,16 @@ def _failed(row: dict[str, Any], code: str, message: str, waited: int) -> dict[s
     }
 
 
+def _unknown(row: dict[str, Any], message: str) -> dict[str, Any]:
+    return {**row, "status": "unknown", "error_code": "edit_unconfirmed", "error_message": message}
+
+
 def _progress_line(row: dict[str, Any], done: int, total: int) -> str:
     status = row["status"]
     if status == "failed":
         return f"[{done}/{total}] #{row['id']}: ОШИБКА {row.get('error_code')}"
+    if status == "unknown":
+        return f"[{done}/{total}] #{row['id']}: НЕИЗВЕСТНО (воркер не ответил)"
     label = "изменён" if status == "edited" else "уже был таким"
     return f"[{done}/{total}] #{row['id']}: {label} ({row['old_length']}→{row['new_length']})"
 
@@ -753,6 +1072,13 @@ def _positive_int(value: str) -> int:
     return number
 
 
+def _non_negative_int(value: str) -> int:
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("не может быть отрицательным")
+    return number
+
+
 def _page_size(value: str) -> int:
     number = int(value)
     if not 1 <= number <= READ_LIMIT_MAX:
@@ -783,6 +1109,12 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="@username канала, ссылка t.me/..., ссылка-приглашение (+hash) или числовой id",
     )
+    common.add_argument(
+        "--max-flood-wait",
+        type=_non_negative_int,
+        default=DEFAULT_MAX_FLOOD_WAIT,
+        help="сколько секунд FloodWait CLI готов переждать перед одним повтором",
+    )
 
     read = commands.add_parser("read", parents=[common], help="выгрузить посты в JSON (бэкап)")
     read.add_argument(
@@ -797,10 +1129,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PAGE_SIZE,
         help=f"постов за одну команду воркеру, до {READ_LIMIT_MAX}",
     )
+    read.add_argument(
+        "--page-pause",
+        type=_non_negative_float,
+        default=DEFAULT_PAGE_PAUSE_SECONDS,
+        help="пауза между страницами выгрузки, с",
+    )
     read.add_argument("--out", type=Path, default=None, help="куда сохранить JSON")
 
     edit = commands.add_parser("edit", parents=[common], help="заменить тексты по плану")
-    edit.add_argument("--plan", type=Path, required=True, help='JSON-список {"id", "text"}')
+    edit.add_argument(
+        "--plan", type=Path, required=True, help='JSON-список {"id", "text"} или файл из read'
+    )
     edit.add_argument(
         "--apply", action="store_true", help="применить (без флага — только проверка)"
     )
@@ -814,14 +1154,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--parse-mode",
         choices=("none", "html", "md"),
         default="none",
-        help="разметка новых текстов (по умолчанию простой текст)",
+        help="разметка text у элементов без своего parse_mode и html (по умолчанию простой текст)",
     )
-    edit.add_argument("--link-preview", action="store_true", help="включить превью ссылок")
-    edit.add_argument(
-        "--max-flood-wait",
-        type=int,
-        default=DEFAULT_MAX_FLOOD_WAIT,
-        help="сколько секунд FloodWait CLI готов переждать перед одним повтором",
+    preview = edit.add_mutually_exclusive_group()
+    preview.add_argument(
+        "--link-preview",
+        dest="link_preview",
+        action="store_const",
+        const=True,
+        default=None,
+        help="включить превью ссылок во всех постах плана",
+    )
+    preview.add_argument(
+        "--no-link-preview",
+        dest="link_preview",
+        action="store_const",
+        const=False,
+        help="выключить превью ссылок (по умолчанию превью остаётся, как сейчас у поста)",
     )
     edit.add_argument(
         "--backup-dir",
@@ -875,6 +1224,8 @@ async def _run(args: argparse.Namespace) -> int:
                 out_path=out_path,
                 limit=args.limit,
                 page_size=args.page_size,
+                page_pause=args.page_pause,
+                max_flood_wait=args.max_flood_wait,
             )
         return await run_edit(
             caller,
