@@ -13,8 +13,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import time
 import uuid
+from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +35,78 @@ logger = get_logger(__name__)
 
 API_BASE = "https://api.telegram.org"
 
+#: Telegram держит ~20 сообщений в минуту на группу; правки считаем так же.
+#: Карточкам совпадений берём меньше — запас на ревью, лиды и дайджест.
+DEFAULT_MAX_PER_MINUTE = 18
+#: И не чаще раза в секунду в один чат (общий лимит Bot API на чат).
+DEFAULT_MIN_INTERVAL_SECONDS = 1.0
+#: Вызовы Bot API, которые пишут в чат и потому считаются в лимит группы.
+_RATE_LIMITED_METHODS = frozenset({"sendMessage", "editMessageText", "editMessageReplyMarkup"})
+#: Карточку ревью (с кнопками) после 429 повторяем один раз, если Telegram
+#: просит подождать не дольше этого: она шлётся прямо из обработки сообщения,
+#: и долгий сон задержал бы обработчик (сам ответ лиду здесь не ждёт — его ещё
+#: не отправляли, он на проверке).
+REVIEW_RETRY_MAX_SECONDS = 10.0
+
+
+class ChatRateLimiter:
+    """Не больше max_per_window сообщений/правок в чат за window секунд, не
+    чаще раза в min_interval и — после 429 — ничего до конца retry_after.
+
+    Один на NotifierBot: все вызовы Bot API в группу отмечаются в нём (note),
+    поэтому карточки совпадений (acquire — ждёт своей очереди) уступают место
+    карточкам ревью, лидов и дайджесту, которые идут без ожидания. Лимит — на
+    процесс: два воркера на одну группу вместе могут превысить его (тогда
+    выручает 429 → retry_after). Часы и сон подменяются в тестах.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_per_window: int = DEFAULT_MAX_PER_MINUTE,
+        window_seconds: float = 60.0,
+        min_interval_seconds: float = DEFAULT_MIN_INTERVAL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._max = max(max_per_window, 1)
+        self._window = window_seconds
+        self._min_interval = min_interval_seconds
+        self._clock = clock
+        self._sleep = sleep
+        self._sent: dict[int, deque[float]] = {}
+        self._blocked_until: dict[int, float] = {}
+
+    def delay(self, chat_id: int) -> float:
+        """Сколько секунд ждать до следующей отправки в этот чат."""
+        now = self._clock()
+        wait = self._blocked_until.get(chat_id, 0.0) - now
+        sent = self._sent.get(chat_id)
+        if sent:
+            while sent and sent[0] <= now - self._window:
+                sent.popleft()
+            if sent:
+                wait = max(wait, sent[-1] + self._min_interval - now)
+                if len(sent) >= self._max:
+                    wait = max(wait, sent[0] + self._window - now)
+        return max(wait, 0.0)
+
+    async def acquire(self, chat_id: int) -> None:
+        """Ждёт свободного места в окне и занимает его."""
+        while (wait := self.delay(chat_id)) > 0:
+            await self._sleep(wait)
+        self.note(chat_id)
+
+    def note(self, chat_id: int) -> None:
+        """Отмечает вызов, ушедший без ожидания (ревью, лид, дайджест)."""
+        self._sent.setdefault(chat_id, deque()).append(self._clock())
+
+    def block(self, chat_id: int, seconds: float) -> None:
+        """429: в этот чат ничего не шлём ближайшие seconds секунд."""
+        until = self._clock() + max(seconds, 0.0)
+        self._blocked_until[chat_id] = max(self._blocked_until.get(chat_id, 0.0), until)
+
+
 _CHECK_AI_KEYBOARD = {
     "inline_keyboard": [[{"text": "🔍 Проверить ИИ (codex.sale)", "callback_data": "check_ai"}]]
 }
@@ -45,23 +121,57 @@ _START_MENU_KEYBOARD = {
 class NotifierBot:
     """Отправка карточек лидов через Bot API форум-группы."""
 
-    def __init__(self, box: SecretBox, proxy: str | None = None) -> None:
+    def __init__(
+        self,
+        box: SecretBox,
+        proxy: str | None = None,
+        *,
+        limiter: ChatRateLimiter | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
         self._box = box
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(20.0), proxy=proxy)
+        # Общий на все вызовы в группу: карточки совпадений ждут в нём своей
+        # очереди, остальные сообщения бота только отмечаются (см. _call).
+        self.limiter = limiter or ChatRateLimiter()
+        self._sleep = sleep
 
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def _call(self, token: str, method: str, **params: Any) -> dict[str, Any]:
+    async def _call(
+        self, token: str, method: str, *, counted: bool = False, **params: Any
+    ) -> dict[str, Any]:
+        """Вызов Bot API.
+
+        counted=True — место в лимите группы уже занято (ChatRateLimiter.acquire
+        у MatchLogReporter); иначе вызов в группу просто отмечается в лимите.
+        """
+        raw_chat_id = params.get("chat_id")
+        chat_id = raw_chat_id if isinstance(raw_chat_id, int) else None
+        limited = method in _RATE_LIMITED_METHODS and chat_id is not None
+        if chat_id is not None and limited and not counted:
+            self.limiter.note(chat_id)
         resp = await self._client.post(f"{API_BASE}/bot{token}/{method}", json=params)
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:  # 502 от прокси/балансера — HTML вместо JSON
+            raise NotifyTransientError(
+                f"Bot API {method}: HTTP {resp.status_code}, ответ не JSON"
+            ) from exc
         if not data.get("ok"):
             description = data.get("description") or f"Bot API {method} failed"
             retry_after = (data.get("parameters") or {}).get("retry_after")
-            if data.get("error_code") == 429 or retry_after is not None:
+            error_code = data.get("error_code")
+            if error_code == 429 or retry_after is not None:
                 # Лимит Telegram (≈20 сообщений в минуту на группу): сколько ждать,
                 # Bot API говорит сам — его и соблюдаем (см. MatchLogReporter).
-                raise NotifyRateLimitError(description, retry_after=float(retry_after or 1))
+                wait = float(retry_after or 1)
+                if chat_id is not None and limited:
+                    self.limiter.block(chat_id, wait)
+                raise NotifyRateLimitError(description, retry_after=wait)
+            if isinstance(error_code, int) and error_code >= 500:
+                raise NotifyTransientError(description)
             raise NotifyError(description)
         return data["result"]
 
@@ -217,25 +327,45 @@ class NotifierBot:
 
     # --- карточки совпадений (MatchLogReporter) -------------------------------
     async def log_target(self, db: AsyncSession, *, rule_id: uuid.UUID | None) -> LogTarget | None:
-        """Куда слать карточку совпадения правила; None — слать не нужно.
+        """Куда слать карточку совпадения правила; None — уведомления выключены.
 
         Та же маршрутизация, что у notify_lead: свой топик правила, если он у
-        правила включён, иначе общий поток «Общение ИИ». None — уведомления
-        выключены/не настроены или выключен сам режим «каждое совпадение».
+        правила включён, иначе общий поток «Общение ИИ». Режим «каждое
+        совпадение» (log_all_matches) адрес не меняет — он в target.all_matches:
+        выключен — карточка уходит, только если ответ отправлен (как было до
+        него). Для своего топика правила заодно отдаём общий поток: туда
+        уходит короткая строка об отправленном ответе со ссылкой на карточку.
         """
         row = await db.get(NotifySettings, SINGLETON_ID)
-        if row is None or row.log_all_matches is False:
+        if row is None:
             return None
         loaded = await self._load_settings(db)
         if loaded is None:
             return None
         token, group_id = loaded
         rule = await db.get(Rule, rule_id) if rule_id is not None else None
+        stream_thread_id: int | None = None
         if rule is not None and rule.notify_topic_enabled:
             thread_id = await self._ensure_topic(db, token, group_id, rule.id, rule.name)
+            stream_thread_id = await self._ensure_stream_topic(db, token, group_id)
         else:
             thread_id = await self._ensure_stream_topic(db, token, group_id)
-        return LogTarget(token=token, group_id=group_id, thread_id=thread_id)
+        return LogTarget(
+            token=token,
+            group_id=group_id,
+            thread_id=thread_id,
+            all_matches=row.log_all_matches is not False,
+            stream_thread_id=stream_thread_id,
+        )
+
+    async def log_all_matches_enabled(self, db: AsyncSession) -> bool:
+        """Включён ли режим «карточка на каждое совпадение» (по умолчанию — да).
+
+        При нём отдельную карточку лида (SAVE_LEAD) не шлём: лид виден в
+        карточке совпадения, иначе на одно сообщение приходило бы два.
+        """
+        row = await db.get(NotifySettings, SINGLETON_ID)
+        return row is None or row.log_all_matches is not False
 
     async def send_log_card(
         self, target: LogTarget, text: str, *, reply_to: int | None = None
@@ -243,7 +373,7 @@ class NotifierBot:
         """Шлёт карточку (или ответ на неё) и возвращает id сообщения в группе.
 
         Поднимает NotifyRateLimitError/NotifyError: повтор и учёт лимитов — на
-        стороне MatchLogReporter.
+        стороне MatchLogReporter (место в лимите он уже занял — counted).
         """
         params: dict[str, Any] = {
             "chat_id": target.group_id,
@@ -256,7 +386,7 @@ class NotifierBot:
         if reply_to is not None:
             params["reply_to_message_id"] = reply_to
             params["allow_sending_without_reply"] = True
-        result = await self._call(target.token, "sendMessage", **params)
+        result = await self._call(target.token, "sendMessage", counted=True, **params)
         return int(result["message_id"])
 
     async def edit_log_card(self, target: LogTarget, message_id: int, text: str) -> None:
@@ -265,6 +395,7 @@ class NotifierBot:
             await self._call(
                 target.token,
                 "editMessageText",
+                counted=True,
                 chat_id=target.group_id,
                 message_id=message_id,
                 text=text,
@@ -278,6 +409,31 @@ class NotifierBot:
                 return
             raise
 
+    async def note_on_card(
+        self,
+        token: str,
+        group_id: int,
+        thread_id: int | None,
+        message_id: int,
+        text: str,
+    ) -> None:
+        """Короткая строка ответом на карточку в её топике (решение по ревью).
+
+        Никогда не поднимает исключение: это пометка, а не работа.
+        """
+        params: dict[str, Any] = {
+            "chat_id": group_id,
+            "text": text,
+            "reply_to_message_id": message_id,
+            "allow_sending_without_reply": True,
+        }
+        if thread_id is not None:
+            params["message_thread_id"] = thread_id
+        try:
+            await self._call(token, "sendMessage", **params)
+        except Exception as exc:  # noqa: BLE001 — пометка не критична
+            logger.warning("note_on_card_failed", detail=str(exc)[:200])
+
     async def record_error(self, db: AsyncSession, detail: str) -> None:
         """Последняя ошибка бота — видна в настройках панели."""
         await self._record_error(db, detail)
@@ -288,6 +444,9 @@ class NotifierBot:
         review — строка PendingReview. Топик создаётся лениво. id отправленного
         сообщения запоминаем в review.notify_message_id, чтобы потом отредактировать
         карточку после решения оператора. Никогда не роняет обработку.
+
+        На 429 — одна повторная попытка после retry_after (если ждать недолго,
+        см. REVIEW_RETRY_MAX_SECONDS): без карточки оператор не увидит кнопок.
         """
         try:
             settings = await self._load_settings(db)
@@ -304,24 +463,31 @@ class NotifierBot:
                 ]
             }
             chat = await db.get(Chat, review.chat_id) if review.chat_id else None
-            result = await self._call(
-                token,
-                "sendMessage",
-                chat_id=group_id,
-                message_thread_id=thread_id,
-                text=format_review_card(
+            params: dict[str, Any] = {
+                "chat_id": group_id,
+                "message_thread_id": thread_id,
+                "text": format_review_card(
                     review,
                     chat_title=chat.title if chat else None,
                     chat_username=chat.username if chat else None,
                 ),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-                reply_markup=keyboard,
-            )
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+                "reply_markup": keyboard,
+            }
+            try:
+                result = await self._call(token, "sendMessage", **params)
+            except NotifyRateLimitError as exc:
+                if exc.retry_after > REVIEW_RETRY_MAX_SECONDS:
+                    raise
+                logger.warning("send_review_throttled", retry_after=exc.retry_after)
+                await self._sleep(exc.retry_after)
+                result = await self._call(token, "sendMessage", **params)
             review.notify_message_id = int(result["message_id"])
             await db.flush()
         except Exception as exc:  # noqa: BLE001 — уведомление не критично
             logger.warning("send_review_failed", detail=str(exc)[:200])
+            await self._record_error(db, f"карточка ревью: {exc}"[:300])
 
     async def notify_digest(self, db: AsyncSession, text: str) -> None:
         """Шлёт дневную сводку в топик «Дайджест» (создаёт лениво)."""
@@ -491,6 +657,34 @@ class NotifyRateLimitError(NotifyError):
         self.retry_after = retry_after
 
 
+class NotifyTransientError(NotifyError):
+    """Временный сбой Bot API (5xx, ответ не JSON): повтор имеет смысл."""
+
+
+#: Описания Bot API, после которых карточку уже не отредактировать: её удалили,
+#: она слишком старая или id неверный. Остальные ошибки правки — не повод
+#: навсегда переходить на ответы.
+_UNEDITABLE_MARKERS = (
+    "message to edit not found",
+    "message can't be edited",
+    "message_id_invalid",
+    "message identifier is not specified",
+)
+
+
+def is_uneditable(exc: BaseException) -> bool:
+    """Ошибка правки значит «это сообщение больше не отредактировать»."""
+    if not isinstance(exc, NotifyError) or isinstance(exc, NotifyTransientError):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _UNEDITABLE_MARKERS)
+
+
+def is_transient(exc: BaseException) -> bool:
+    """Сбой, который стоит повторить позже: 429, 5xx, сеть, битый ответ."""
+    return isinstance(exc, NotifyRateLimitError | NotifyTransientError | httpx.TransportError)
+
+
 @dataclass(frozen=True, slots=True)
 class LogTarget:
     """Куда шлётся карточка: группа и топик. Токен не попадает в repr/логи."""
@@ -498,6 +692,12 @@ class LogTarget:
     token: str = field(repr=False)
     group_id: int
     thread_id: int | None
+    # Режим «каждое совпадение». Выключен — карточка уходит, только если
+    # ответ отправлен (как было до этого режима).
+    all_matches: bool = True
+    # У правила свой топик: сюда (общий поток «Общение ИИ») уходит короткая
+    # строка об отправленном ответе со ссылкой на карточку. None — не нужно.
+    stream_thread_id: int | None = None
 
 
 def format_lead_card(

@@ -301,21 +301,23 @@ class Worker:
         if self._reply_pipeline is not None:
             with contextlib.suppress(Exception):
                 await self._reply_pipeline.shutdown()
-        # Карточки совпадений — после отложенных ответов (их итог тоже идёт в
-        # карточку) и до закрытия HTTP-клиента бота: у очереди несколько
-        # секунд, чтобы дойти до конца.
-        if self._match_log is not None:
-            with contextlib.suppress(Exception):
-                await self._match_log.close()
 
-        with contextlib.suppress(Exception):
-            await self._notifier.close()
         await self._auth.shutdown()
         if self._ai_provider is not None:
             with contextlib.suppress(Exception):
                 await self._ai_provider.close()
         if self._accounts is not None:
             await self._accounts.shutdown()
+        # Карточки совпадений — после отложенных ответов и остановки клиентов
+        # Telegram: пока клиенты живы, обработчики ещё открывают карточки и
+        # дописывают итоги (в том числе «прервано» у отменённых). Потом у
+        # очереди несколько секунд, чтобы дойти до конца, и лишь затем
+        # закрывается HTTP-клиент бота.
+        if self._match_log is not None:
+            with contextlib.suppress(Exception):
+                await self._match_log.close()
+        with contextlib.suppress(Exception):
+            await self._notifier.close()
         if self._commands is not None:
             with contextlib.suppress(Exception):
                 await self._commands.drop_stream()
@@ -470,6 +472,9 @@ class Worker:
                     await self._notifier.finalize_review_card(
                         token, group_id, message_id, "✖️ Пропущено оператором"
                     )
+                await self._note_match_card(
+                    token, group_id, review, "✖️ Оператор отклонил ответ — не отправляли"
+                )
                 return
 
             ok, detail = await self._execute_review(db, review)
@@ -481,8 +486,24 @@ class Worker:
                     await self._notifier.finalize_review_card(
                         token, group_id, message_id, "✅ Отправлено оператором"
                     )
+                await self._note_match_card(
+                    token, group_id, review, "✅ Ответ отправлен оператором"
+                )
             else:
                 await self._notifier.answer_callback(token, cb_id, detail[:180] or "не удалось")
+
+    async def _note_match_card(self, token: str, group_id: int, review: Any, text: str) -> None:
+        """Решение по ответу на проверке — к карточке совпадения этого сообщения.
+
+        Иначе карточка в топике правила навсегда осталась бы «на проверке у
+        оператора». id карточки пишет MatchLogReporter; нет его — нет и пометки.
+        """
+        message_id = getattr(review, "match_card_message_id", None)
+        if not message_id:
+            return
+        await self._notifier.note_on_card(
+            token, group_id, review.match_card_thread_id, int(message_id), text
+        )
 
     async def _handle_check_ai_callback(self, token: str, callback: dict[str, Any]) -> None:
         """Кнопка «Проверить ИИ»: настоящий запрос через боевой провайдер (та же
@@ -650,10 +671,19 @@ class Worker:
             if not ok:
                 logger.warning("approved_review_send_failed", detail=detail)
             loaded = await self._notifier.load_token(db)
-            if loaded and message_id:
+            if loaded:
                 token, group_id = loaded
                 note = "✅ Отправлено из панели" if ok else f"⚠️ Не удалось: {detail[:80]}"
-                await self._notifier.finalize_review_card(token, group_id, message_id, note)
+                if message_id:
+                    await self._notifier.finalize_review_card(token, group_id, message_id, note)
+                await self._note_match_card(
+                    token,
+                    group_id,
+                    review,
+                    "✅ Ответ отправлен оператором (из панели)"
+                    if ok
+                    else f"⚠️ Оператор одобрил, но отправить не удалось: {detail[:200]}",
+                )
 
     async def _reconcile_loop(self) -> None:
         """Раз в reconcile_interval_seconds довыгружает пропущенные сообщения

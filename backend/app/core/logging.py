@@ -66,6 +66,9 @@ SENSITIVE_SUBSTRINGS: tuple[str, ...] = ("password", "secret", "token", "api_has
 
 # Строковая сессия Telethon, попавшая в свободный текст сообщения.
 _SESSION_STRING_RE = re.compile(r"\b1[A-Za-z0-9+/=_-]{40,}\b")
+# Токен бота в URL Bot API (https://api.telegram.org/bot<id>:<secret>/method):
+# httpx пишет каждый запрос с полным URL.
+_BOT_TOKEN_RE = re.compile(r"(/bot)\d+:[A-Za-z0-9_-]+")
 
 _MAX_VALUE_LENGTH = 4096
 
@@ -79,7 +82,27 @@ def _is_sensitive(key: str) -> bool:
 
 def _scrub_text(value: str) -> str:
     scrubbed = _SESSION_STRING_RE.sub(REDACTED, value)
+    scrubbed = _BOT_TOKEN_RE.sub(rf"\1{REDACTED}", scrubbed)
     return scrubbed
+
+
+class SecretScrubFilter(logging.Filter):
+    """Вычищает секреты из логов stdlib (httpx, telethon…), мимо structlog.
+
+    httpx на INFO пишет «HTTP Request: POST https://api.telegram.org/bot<токен>/…»
+    на каждый вызов Bot API — токен бота оказывался в stdout открытым текстом.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 — кривой формат не повод терять запись
+            return True
+        scrubbed = _scrub_text(message)
+        if scrubbed != message:
+            record.msg = scrubbed
+            record.args = None
+        return True
 
 
 def mask_phone(phone: str | None) -> str | None:
@@ -125,10 +148,14 @@ def configure_logging(settings: Settings) -> None:
         level=getattr(logging, settings.log_level),
         force=True,
     )
-    for noisy in ("uvicorn.access", "sqlalchemy.engine.Engine", "telethon"):
+    # httpx/httpcore: строка на каждый HTTP-запрос (Bot API — с токеном в URL).
+    for noisy in ("uvicorn.access", "sqlalchemy.engine.Engine", "telethon", "httpx", "httpcore"):
         logging.getLogger(noisy).setLevel(
             logging.WARNING if settings.log_level == "INFO" else logging.INFO
         )
+    # И на всякий случай — маска токена/сессии в любой stdlib-записи.
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(SecretScrubFilter())
 
     renderer: Any
     processors: list[Any] = [

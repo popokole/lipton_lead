@@ -5,27 +5,38 @@
 
 1. Сразу после совпадения (после claim() в MonitorPipeline — одно и то же
    сообщение не попадёт дважды, даже если его довыгрузит реконсайлер) ставим
-   в очередь карточку: правило, аккаунт, чат и ссылка, отправитель, текст,
-   время. Маршрут — как у notify_lead: свой топик правила, если включён,
-   иначе общий поток «Общение ИИ».
+   в очередь карточку: правило (и какие ещё совпали), аккаунт, чат и ссылка,
+   отправитель, текст, время. Маршрут — как у notify_lead: свой топик
+   правила, если включён, иначе общий поток «Общение ИИ».
 2. Когда итог известен, та же карточка редактируется (editMessageText): ✅
-   ответ ушёл (текст ответа и лички) / ❌ не удалось отправить / ⏭ не
-   отправляли и почему / 🟡 на проверке у оператора / ⏳ ответ запланирован
-   через N с (потом — итог). Если отредактировать не вышло (сообщение удалено,
-   слишком старое) — итог уходит ответом на карточку в тот же топик.
+   ответ ушёл (текст ответа и лички, лид и его балл) / ⚠️ в чат ушло, личка
+   нет / ❌ не удалось отправить / ⏭ не отправляли и почему / 🟡 на проверке
+   у оператора / ⏳ ответ запланирован (потом — итог) / 🎯 лид сохранён. Если
+   отредактировать уже нельзя (сообщение удалено, слишком старое) — итог
+   уходит ответом на карточку в тот же топик.
+3. Правило со своим топиком: об отправленном ответе ещё и короткая строка со
+   ссылкой на карточку в общий поток «Общение ИИ» — там по-прежнему видны все
+   наши ответы.
+
+Режим выключен (notify_settings.log_all_matches = false) — как было до него:
+карточка уходит, только если ответ отправлен (CardState.HELD ждёт итога).
 
 Всё это вторично по отношению к ответу лиду: конвейер только кладёт задание в
 очередь (синхронно, без await и без исключений), а в Bot API ходит одна
 фоновая задача. Она соблюдает лимит Telegram (~20 сообщений в минуту на
-группу, см. ChatRateLimiter) и retry_after из 429: ждёт и повторяет один раз.
-Если очередь переполнена, выбрасываются самые старые ещё не отправленные
-карточки — с предупреждением в журнале и счётчиком, а не молча.
+группу, общий ChatRateLimiter бота) и retry_after из 429: ждёт и повторяет;
+временные сбои (429, 5xx, сеть) ставят задание в конец очереди ещё до
+MAX_REQUEUES раз. Если очередь переполнена, выбрасываются сначала строки в
+общий поток, потом самые старые ещё не отправленные карточки — с
+предупреждением в журнале и счётчиком, а не молча.
 
 Ссылка на карточку (MatchCard) идёт вместе с обработкой сообщения:
 MonitorPipeline → ReplyPipeline.handle → _PreparedReply → фоновая задача
 отложенного ответа, которая и дописывает итог после паузы. Хранится она только
 в памяти: после жёсткого падения воркера карточка так и останется с «⏳», а
-зависший ответ отдаст оператору sweep_stale_scheduled.
+зависший ответ отдаст оператору sweep_stale_scheduled. Для ответа на проверке
+id карточки пишется в PendingReview — решение оператора (кнопки, панель)
+дописывается к ней ответом.
 """
 
 from __future__ import annotations
@@ -34,28 +45,34 @@ import asyncio
 import contextlib
 import html
 import re
-import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, TypeVar
 
+from sqlalchemy import update
+
+from app.core.clock import utcnow
 from app.core.logging import get_logger
 from app.database.session import Database
-from app.models import Account, ActionStatus, ActionType
+from app.models import Account, ActionStatus, ActionType, PendingReview
 from app.notifications.notifier import (
+    ChatRateLimiter,
     LogTarget,
     NotifierBot,
     NotifyRateLimitError,
+    is_transient,
+    is_uneditable,
     message_link,
 )
 from app.rules.engine import RuleMatch
 from app.telegram.messages import NormalizedMessage
 
 if TYPE_CHECKING:
+    from app.ai.analyzer import AnalysisOutcome
     from app.pipeline.reply_pipeline import ReplyOutcome
 
 logger = get_logger(__name__)
@@ -68,22 +85,32 @@ MAX_INCOMING_CHARS = 700
 MAX_REPLY_CHARS = 700
 MAX_NAME_CHARS = 100
 MAX_REASON_CHARS = 400
+MAX_ALSO_MATCHED_CHARS = 200
+MAX_LEAD_STATUS_CHARS = 20
 TELEGRAM_TEXT_LIMIT = 4096
 
-#: Очередь заданий к Bot API. При переполнении выбрасываются самые старые
-#: ещё не отправленные карточки (с предупреждением в журнале).
+#: Очередь заданий к Bot API. При переполнении выбрасываются сначала строки в
+#: общий поток, потом самые старые ещё не отправленные карточки.
 DEFAULT_QUEUE_LIMIT = 200
-#: Telegram держит ~20 сообщений в минуту на группу; правки считаем так же.
-#: Берём меньше — запас на карточки ревью, лидов и дайджест того же бота.
-DEFAULT_MAX_PER_MINUTE = 18
-#: И не чаще раза в секунду в один чат (общий лимит Bot API на чат).
-DEFAULT_MIN_INTERVAL_SECONDS = 1.0
 #: Сколько при остановке воркера ждём, пока очередь дойдёт до конца.
 DEFAULT_CLOSE_GRACE_SECONDS = 5.0
+#: Сколько раз задание карточки после временного сбоя (429 и после повтора,
+#: 5xx, сеть) встаёт в конец очереди, прежде чем мы сдадимся (с записью в
+#: журнал и в last_error бота). Лимитёр уже ждёт retry_after, так что это не
+#: крутится вхолостую.
+MAX_REQUEUES = 3
 
 PENDING_LINE = "⌛ Обрабатываю…"
 STOPLIST_LINE = "⏭ Не отправляли: отправитель в стоп-листе"
 NO_REPLY_PIPELINE_LINE = "⏭ Не отправляли: ответы на этом воркере выключены"
+#: Отмена (остановка воркера) до того, как дошло до ответа.
+INTERRUPTED_BEFORE_REPLY_LINE = "⏭ Не отправляли: обработка прервана (остановка воркера)"
+#: Отмена посреди обработки ответа: отправка могла уже начаться.
+INTERRUPTED_LINE = (
+    "⚠️ Обработка прервана (остановка воркера) — неизвестно, ушёл ли ответ; проверьте диалог"
+)
+SENT_HEAD = "✅ Ответ отправлен"
+DM_FAILED_HEAD = "⚠️ В чат ушло, личка НЕ ушла"
 
 
 # --- текст карточки ----------------------------------------------------------------
@@ -116,6 +143,23 @@ def clip(text: str, limit: int) -> str:
     return "".join(out).rstrip() + "…"
 
 
+def format_duration(seconds: float | None) -> str:
+    """Пауза по-человечески: «35 с», «47 мин 27 с», «1 ч»."""
+    if seconds is None:
+        return "? с"
+    total = max(round(seconds), 0)
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours} ч")
+    if minutes:
+        parts.append(f"{minutes} мин")
+    if secs or not parts:
+        parts.append(f"{secs} с")
+    return " ".join(parts)
+
+
 def format_match_card(
     *,
     rule_name: str,
@@ -132,11 +176,13 @@ def format_match_card(
     date: datetime | None,
     tz_offset_hours: int = 0,
     result: str | None = None,
+    also_matched: Sequence[str] = (),
 ) -> str:
     """Карточка совпадения: правило, кто, откуда, когда, что написал, итог.
 
     result — уже готовый HTML итога (см. outcome_line); None — итог ещё не
-    известен. Всё пользовательское экранируется и обрезается.
+    известен. also_matched — остальные совпавшие правила (stop_on_match
+    выключен). Всё пользовательское экранируется и обрезается.
     """
     handle = f"@{sender_username}" if sender_username else None
     who = sender_name or handle or str(sender_tg_id or "?")
@@ -155,11 +201,11 @@ def format_match_card(
         where_line += f' · <a href="{html.escape(link, quote=True)}">сообщение</a>'
     where_line += f" · аккаунт {_esc(clip(account_label, MAX_NAME_CHARS))}"
 
-    lines = [
-        f"🔔 <b>Совпадение</b> · {_esc(clip(rule_name, MAX_NAME_CHARS))}",
-        sender_line,
-        where_line,
-    ]
+    lines = [f"🔔 <b>Совпадение</b> · {_esc(clip(rule_name, MAX_NAME_CHARS))}"]
+    if also_matched:
+        names = clip(", ".join(also_matched), MAX_ALSO_MATCHED_CHARS)
+        lines.append(f"➕ Также совпали: {_esc(names)}")
+    lines += [sender_line, where_line]
     if date is not None:
         local = date + timedelta(hours=tz_offset_hours)
         lines.append(f"🕒 {local:%d.%m %H:%M:%S}")
@@ -167,6 +213,21 @@ def format_match_card(
     lines += ["", "<b>Сообщение:</b>", _esc(clip(text, MAX_INCOMING_CHARS))]
     lines += ["", result or PENDING_LINE]
     return "\n".join(lines)
+
+
+def format_stream_note(
+    *, head: str, rule_name: str, message: NormalizedMessage, card_link: str | None
+) -> str:
+    """Строка в общий поток «Общение ИИ» об ответе по правилу со своим топиком."""
+    handle = f"@{message.sender_username}" if message.sender_username else None
+    who = message.sender_display_name or handle or str(message.sender_tg_id or "?")
+    parts = [
+        f"{head} · <b>{_esc(clip(rule_name, MAX_NAME_CHARS))}</b>",
+        f"👤 {_esc(clip(who, MAX_NAME_CHARS))}",
+    ]
+    if card_link:
+        parts.append(f'<a href="{html.escape(card_link, quote=True)}">карточка</a>')
+    return " · ".join(parts)
 
 
 # --- итог обработки → строка карточки -------------------------------------------
@@ -178,17 +239,35 @@ _COOLDOWN_SCOPES = {
     "scenario": "сценарий недавно уже отвечал",
 }
 _AI_SKIP = re.compile(r"^AI: не отвечать \(confidence ([\d.]+), порог ([\d.]+)\)$")
+_LOW_CONFIDENCE_PREFIX = "низкая уверенность AI"
 _EXACT_REASONS = {
     "анти-бан: лимит на чат": "анти-бан: в этот чат недавно уже отвечали",
     "вне рабочих часов": "вне рабочих часов",
     "one_shot: уже связались": "«один заход»: с этим человеком уже связывались",
     "one_shot: ответ уже запланирован": "«один заход»: ответ этому человеку уже запланирован",
+    "duplicate": "уже выполнялось раньше",
+    "ignored": "пропущено",
 }
 _SIMPLE_ACTIONS = {
     ActionType.NOTIFY_ADMIN: "уведомление в панель",
     ActionType.SAVE_LEAD: "сохранить лида",
     ActionType.TAG_USER: "метка собеседнику",
 }
+_STATUS_RU = {
+    ActionStatus.PENDING: "в очереди",
+    ActionStatus.VALIDATING: "на проверке",
+    ActionStatus.READY: "готово к отправке",
+    ActionStatus.SENDING: "отправляется",
+    ActionStatus.SENT: "выполнено",
+    ActionStatus.FAILED: "сбой",
+    ActionStatus.CANCELLED: "отменено",
+    ActionStatus.REJECTED: "отклонено",
+}
+
+
+def status_ru(status: ActionStatus) -> str:
+    """Статус действия словами оператора, а не «FAILED»."""
+    return _STATUS_RU.get(status, str(status.value).lower())
 
 
 def humanize_reason(reason: str | None) -> str:
@@ -201,6 +280,8 @@ def humanize_reason(reason: str | None) -> str:
         return f"кулдаун — {_COOLDOWN_SCOPES.get(scope, scope)}"
     if reason in _EXACT_REASONS:
         return _EXACT_REASONS[reason]
+    if reason in ActionStatus.__members__:
+        return status_ru(ActionStatus(reason))
     ai = _AI_SKIP.match(reason)
     if ai:
         return f"ИИ решил не отвечать (уверенность {ai.group(1)} при пороге {ai.group(2)})"
@@ -211,6 +292,21 @@ def _reason(text: str | None) -> str:
     return _esc(clip(humanize_reason(text), MAX_REASON_CHARS))
 
 
+def skipped_line(reason: str | None) -> str:
+    """«⏭ Не отправляли: …» — готовый (экранированный, обрезанный) HTML."""
+    return f"⏭ Не отправляли: {_reason(reason)}"
+
+
+def failed_line(reason: str | None) -> str:
+    """«❌ Не удалось отправить: …» — готовый HTML."""
+    return f"❌ Не удалось отправить: {_reason(reason)}"
+
+
+def unknown_line(reason: str | None) -> str:
+    """«⚠️ Неизвестно, ушёл ли ответ: …» — отправка прервана на середине."""
+    return f"⚠️ Неизвестно, ушёл ли ответ: {_reason(reason)}"
+
+
 def _confidence(outcome: ReplyOutcome) -> str:
     analysis = outcome.analysis
     if analysis is None or analysis.failed:
@@ -218,28 +314,103 @@ def _confidence(outcome: ReplyOutcome) -> str:
     return f" · уверенность ИИ {analysis.result.confidence:.2f}"
 
 
-def _seconds(value: float | None) -> str:
-    return f"{value:.0f} с" if value is not None else "? с"
+def _ai_verdict(analysis: AnalysisOutcome) -> str | None:
+    """Решение ИИ «не отвечать» словами — без противоречия «уверенность 0.95 и
+    не ответили»: высокая уверенность в «не лид» — это уверенное «нет»."""
+    if analysis.failed:
+        return f"сбой ИИ — {analysis.failure_reason or 'ИИ недоступен'}"
+    result = analysis.result
+    if not result.relevant:
+        return f"ИИ — не лид (уверенность {result.confidence:.2f})"
+    if result.confidence < analysis.threshold:
+        return f"ИИ не уверен: {result.confidence:.2f} < порога {analysis.threshold:.2f}"
+    return None
 
 
-def outcome_line(outcome: ReplyOutcome) -> str:
+def _skip_reason(outcome: ReplyOutcome) -> tuple[str, bool]:
+    """Причина «не отправляли» (HTML) и нужно ли пояснение модели под ней."""
+    reason = outcome.reason
+    analysis = outcome.analysis
+    if analysis is not None:
+        verdict: str | None = None
+        if outcome.action is ActionType.IGNORE:
+            if reason and _AI_SKIP.match(reason.strip()):
+                verdict = _ai_verdict(analysis)
+        elif analysis.failed:
+            # Сбой анализатора — поломка, а не решение модели: так и пишем.
+            return _esc(clip(_ai_verdict(analysis) or "сбой ИИ", MAX_REASON_CHARS)), False
+        elif reason and reason.startswith(_LOW_CONFIDENCE_PREFIX):
+            verdict = _ai_verdict(analysis)
+        elif analysis.result.needs_human and reason == (
+            analysis.result.reason or "модель просит передать человеку"
+        ):
+            verdict = "ИИ просит передать диалог человеку"
+        if verdict is not None:
+            return _esc(clip(verdict, MAX_REASON_CHARS)), True
+    return _reason(reason), False
+
+
+def _ai_note(outcome: ReplyOutcome) -> str:
+    """Пояснение самой модели (analysis.result.reason) отдельной строкой."""
+    analysis = outcome.analysis
+    if analysis is None or analysis.failed:
+        return ""
+    explanation = (analysis.result.reason or "").strip()
+    if not explanation:
+        return ""
+    return f"\nИИ: {_esc(clip(explanation, MAX_REASON_CHARS))}"
+
+
+def _handover(outcome: ReplyOutcome) -> str:
+    if outcome.action is not ActionType.ESCALATE_TO_HUMAN:
+        return ""
+    if outcome.status is ActionStatus.SENT:
+        return " · передано оператору"
+    return f" · ⚠️ передать оператору не удалось ({status_ru(outcome.status)})"
+
+
+def _eta(delay: float | None, tz_offset_hours: int, now: datetime | None) -> str:
+    if delay is None:
+        return ""
+    moment = (now or utcnow()) + timedelta(seconds=delay, hours=tz_offset_hours)
+    return f" (≈ в {moment:%H:%M})"
+
+
+def _lead_line(outcome: ReplyOutcome, prefix: str) -> str | None:
+    if not outcome.lead_status:
+        return None
+    status = _esc(clip(outcome.lead_status, MAX_LEAD_STATUS_CHARS))
+    score = f" ({outcome.lead_score})" if outcome.lead_score is not None else ""
+    return f"{prefix} · {status}{score}"
+
+
+def outcome_line(
+    outcome: ReplyOutcome, *, tz_offset_hours: int = 0, now: datetime | None = None
+) -> str:
     """Итог обработки совпадения — готовый (экранированный) HTML для карточки.
 
-    ✅ ответ ушёл · ❌ отправка не удалась · ⏭ не отправляли и почему ·
-    🟡 на проверке у оператора · ⏳ ответ запланирован.
+    ✅ ответ ушёл · ⚠️ в чат ушло, личка нет / неизвестно, ушёл ли ответ ·
+    ❌ отправка не удалась · ⏭ не отправляли и почему · 🟡 на проверке у
+    оператора · ⏳ ответ запланирован (с ожидаемым местным временем) ·
+    🎯 лид сохранён.
     """
     action, status = outcome.action, outcome.status
-    handed_over = " · передано оператору" if action is ActionType.ESCALATE_TO_HUMAN else ""
+    handover = _handover(outcome)
 
+    if outcome.send_unknown:
+        return f"{unknown_line(outcome.send_error or outcome.reason)}{handover}"
     if outcome.send_error is not None:
-        return f"❌ Не удалось отправить: {_reason(outcome.send_error)}{handed_over}"
+        return f"{failed_line(outcome.send_error)}{handover}"
 
     if action is ActionType.REPLY:
         if status is ActionStatus.PENDING:
-            delay = _seconds(outcome.delay_seconds)
-            return f"⏳ Ответ запланирован через {delay}{_confidence(outcome)}"
+            delay = outcome.delay_seconds
+            return (
+                f"⏳ Ответ запланирован через {format_duration(delay)}"
+                f"{_eta(delay, tz_offset_hours, now)}{_confidence(outcome)}"
+            )
         if status is not ActionStatus.SENT:
-            return f"❌ Не удалось отправить: {_reason(outcome.reason or status.value)}"
+            return failed_line(outcome.reason or status_ru(status))
         return _sent_block(outcome)
 
     if action is ActionType.REQUEST_REVIEW:
@@ -248,46 +419,62 @@ def outcome_line(outcome: ReplyOutcome) -> str:
                 "🟡 Не отправляли: ответ на проверке у оператора "
                 f"(карточка с кнопками — в «Общение ИИ»){_confidence(outcome)}"
             )
-        return f"❌ Не удалось отдать ответ на проверку оператору: {_reason(outcome.reason)}"
+        return (
+            "❌ Не удалось отдать ответ на проверку оператору: "
+            f"{_reason(outcome.reason or status_ru(status))}"
+        )
 
-    if action is ActionType.IGNORE:
-        line = f"⏭ Не отправляли: {_reason(outcome.reason)}"
-        if status is not ActionStatus.SENT:
-            line += f" (⚠️ отметка в журнале: {status.value})"
+    if action in (ActionType.IGNORE, ActionType.ESCALATE_TO_HUMAN):
+        reason, with_note = _skip_reason(outcome)
+        line = f"⏭ Не отправляли: {reason}"
+        if action is ActionType.IGNORE and status is not ActionStatus.SENT:
+            line += f" (⚠️ запись в журнал не удалась: {status_ru(status)})"
+        line += handover
+        if with_note:
+            line += _ai_note(outcome)
         return line
 
-    if action is ActionType.ESCALATE_TO_HUMAN:
-        if status is ActionStatus.SENT:
-            return f"⏭ Не отправляли: {_reason(outcome.reason)} · передано оператору"
-        return (
-            f"⏭ Не отправляли: {_reason(outcome.reason)} · "
-            f"⚠️ передать оператору не удалось ({status.value})"
-        )
+    if action is ActionType.SAVE_LEAD and status is ActionStatus.SENT:
+        lead = _lead_line(outcome, "🎯 Лид сохранён")
+        if lead is None:
+            detail = f" ({_reason(outcome.reason)})" if outcome.reason else ""
+            lead = f"🎯 Лид сохранён{detail}"
+        return f"{lead} · правило без ответа"
 
     label = _SIMPLE_ACTIONS.get(action, action.value)
     if status is ActionStatus.SENT:
-        detail = f" ({_esc(clip(outcome.reason, MAX_REASON_CHARS))})" if outcome.reason else ""
+        detail = f" ({_reason(outcome.reason)})" if outcome.reason else ""
         return f"⏭ Не отправляли: правило без ответа — {label}: выполнено{detail}"
-    return f"❌ Не удалось: {label} — {_reason(outcome.reason or status.value)}"
+    return f"❌ Не удалось: {label} — {_reason(outcome.reason or status_ru(status))}"
 
 
 def _sent_block(outcome: ReplyOutcome) -> str:
-    head = "✅ Ответ отправлен"
+    dm_failed = bool(outcome.dm_text and outcome.dm_error)
+    if dm_failed:
+        # В группу ушло только «Отправлю в лс», сам ответ до лида не дошёл:
+        # это не успех, и оператору нужен текст, чтобы дописать вручную.
+        head = f"{DM_FAILED_HEAD}: {_esc(clip(outcome.dm_error or '', MAX_REASON_CHARS))}"
+    else:
+        head = SENT_HEAD
+    notes: list[str] = []
     if outcome.delay_seconds:
-        head += f" (после паузы {_seconds(outcome.delay_seconds)})"
+        notes.append(f"после паузы {format_duration(outcome.delay_seconds)}")
     if outcome.reason == "duplicate":
-        head += " (повтор: этот ответ уже уходил раньше)"
+        notes.append("повтор: этот ответ уже уходил раньше")
+    if notes:
+        head += f" ({', '.join(notes)})"
     head += _confidence(outcome)
     parts = [head]
+    lead = _lead_line(outcome, "🎯 Лид")
+    if lead is not None:
+        parts.append(lead)
     reply = (outcome.reply_text or "").strip()
     if reply:
         title = "В чат" if outcome.dm_text else "Наш ответ"
         parts += [f"<b>{title}:</b>", _esc(clip(reply, MAX_REPLY_CHARS))]
     if outcome.dm_text:
-        if outcome.dm_error:
-            parts.append(f"⚠️ Личка не ушла: {_esc(clip(outcome.dm_error, MAX_REASON_CHARS))}")
-        else:
-            parts += ["<b>В личку:</b>", _esc(clip(outcome.dm_text.strip(), MAX_REPLY_CHARS))]
+        title = "В личку (не доставлено)" if dm_failed else "В личку"
+        parts += [f"<b>{title}:</b>", _esc(clip(outcome.dm_text.strip(), MAX_REPLY_CHARS))]
     return "\n".join(parts)
 
 
@@ -297,65 +484,14 @@ def crash_line(exc: BaseException) -> str:
     return f"❌ Не удалось отправить: обработка упала — {_esc(detail)}"
 
 
-# --- лимит Telegram ----------------------------------------------------------------
-class ChatRateLimiter:
-    """Не больше max_per_window сообщений/правок в чат за window секунд, не
-    чаще раза в min_interval и — после 429 — ничего до конца retry_after.
-
-    Один потребитель (фоновая задача MatchLogReporter), поэтому без блокировок.
-    Часы и сон подменяются в тестах.
-    """
-
-    def __init__(
-        self,
-        *,
-        max_per_window: int = DEFAULT_MAX_PER_MINUTE,
-        window_seconds: float = 60.0,
-        min_interval_seconds: float = DEFAULT_MIN_INTERVAL_SECONDS,
-        clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    ) -> None:
-        self._max = max(max_per_window, 1)
-        self._window = window_seconds
-        self._min_interval = min_interval_seconds
-        self._clock = clock
-        self._sleep = sleep
-        self._sent: dict[int, deque[float]] = {}
-        self._blocked_until: dict[int, float] = {}
-
-    def delay(self, chat_id: int) -> float:
-        """Сколько секунд ждать до следующей отправки в этот чат."""
-        now = self._clock()
-        wait = self._blocked_until.get(chat_id, 0.0) - now
-        sent = self._sent.get(chat_id)
-        if sent:
-            while sent and sent[0] <= now - self._window:
-                sent.popleft()
-            if sent:
-                wait = max(wait, sent[-1] + self._min_interval - now)
-                if len(sent) >= self._max:
-                    wait = max(wait, sent[0] + self._window - now)
-        return max(wait, 0.0)
-
-    async def acquire(self, chat_id: int) -> None:
-        """Ждёт свободного места в окне и занимает его."""
-        while (wait := self.delay(chat_id)) > 0:
-            await self._sleep(wait)
-        self._sent.setdefault(chat_id, deque()).append(self._clock())
-
-    def block(self, chat_id: int, seconds: float) -> None:
-        """429: в этот чат ничего не шлём ближайшие seconds секунд."""
-        until = self._clock() + max(seconds, 0.0)
-        self._blocked_until[chat_id] = max(self._blocked_until.get(chat_id, 0.0), until)
-
-
 # --- карточка и очередь -------------------------------------------------------------
 class CardState(StrEnum):
     QUEUED = "queued"  # ждёт отправки в очереди
     POSTING = "posting"  # отправляется прямо сейчас
     POSTED = "posted"  # в группе, есть message_id
+    HELD = "held"  # режим «каждое совпадение» выключен: ждём, ушёл ли ответ
     FAILED = "failed"  # отправить не вышло — итог попробуем прислать новой карточкой
-    SKIPPED = "skipped"  # уведомления или режим «каждое совпадение» выключены
+    SKIPPED = "skipped"  # уведомления выключены или (режим выключен) ответа не было
     DROPPED = "dropped"  # выброшена из переполненной очереди
 
 
@@ -371,8 +507,16 @@ class MatchCard:
     rule_id: uuid.UUID | None
     rule_name: str
     message: NormalizedMessage = field(repr=False)
+    also_matched: tuple[str, ...] = ()
     result: str | None = None
     final: bool = False
+    # Итог — отправленный ответ: карточка уйдёт и при выключенном режиме
+    # «каждое совпадение», а для своего топика — ещё строка в общий поток.
+    replied: bool = False
+    # Заголовок строки в общий поток (✅ / ⚠️ личка не ушла).
+    note_head: str | None = None
+    # Ответ на проверке: id PendingReview — туда пишем id карточки.
+    review_id: uuid.UUID | None = None
     state: CardState = CardState.QUEUED
     target: LogTarget | None = field(default=None, repr=False)
     account_label: str | None = None
@@ -380,30 +524,66 @@ class MatchCard:
     # Итог, который сейчас виден в группе (в карточке или ответом на неё).
     shown_result: str | None = None
     update_queued: bool = False
-    # Правка не удалась раз — дальше итог сразу ответом на карточку.
+    # Правка невозможна (сообщение удалено/устарело) — дальше итог ответом.
     edit_broken: bool = False
+    # Повторы после временных сбоев (сбрасываются после удачного вызова).
+    attempts: int = 0
+    mirrored: bool = False
+    review_linked: bool = False
 
     def report(self, outcome: ReplyOutcome) -> None:
         """Дописывает итог обработки (ReplyOutcome) в карточку."""
         try:
-            line = outcome_line(outcome)
+            line = outcome_line(outcome, tz_offset_hours=self.reporter.tz_offset_hours)
+            replied = outcome.replied
+            review_id = (
+                outcome.review_id
+                if outcome.action is ActionType.REQUEST_REVIEW
+                and outcome.status is ActionStatus.SENT
+                else None
+            )
+            note_head = DM_FAILED_HEAD if outcome.dm_text and outcome.dm_error else SENT_HEAD
         except Exception:  # карточка не должна ронять конвейер
             logger.exception("match_card_format_failed")
-            line = f"❓ Итог: {_esc(outcome.action.value)} / {_esc(outcome.status.value)}"
-        self.report_line(line, final=not outcome.scheduled)
+            action = getattr(getattr(outcome, "action", None), "value", "?")
+            status = getattr(getattr(outcome, "status", None), "value", "?")
+            line = f"❓ Итог: {_esc(str(action))} / {_esc(str(status))}"
+            replied, review_id, note_head = False, None, None
+        try:
+            final = not outcome.scheduled
+        except Exception:  # noqa: BLE001
+            final = True
+        self._apply(line, final=final, replied=replied, review_id=review_id, note_head=note_head)
 
     def report_line(self, line: str, *, final: bool = True) -> None:
         """Дописывает готовую строку итога. «⏳» не перетирает итог."""
+        self._apply(line, final=final)
+
+    def _apply(
+        self,
+        line: str,
+        *,
+        final: bool,
+        replied: bool = False,
+        review_id: uuid.UUID | None = None,
+        note_head: str | None = None,
+    ) -> None:
         if self.final and not final:
             return
         self.result = line
         self.final = final
+        self.replied = replied and final
+        self.note_head = note_head if self.replied else None
+        if review_id is not None:
+            self.review_id = review_id
         self.reporter._result_changed(self)
 
 
 @dataclass(frozen=True, slots=True)
 class _Op:
-    kind: Literal["post", "update"]
+    # post — отправить карточку; update — дописать итог (правка или ответ);
+    # mirror — строка об ответе в общий поток «Общение ИИ».
+    kind: Literal["post", "update", "mirror"]
     card: MatchCard
 
 
@@ -421,9 +601,11 @@ class MatchLogReporter:
     ) -> None:
         self._database = database
         self._notifier = notifier
-        self._tz_offset = tz_offset_hours
+        self.tz_offset_hours = tz_offset_hours
         self._queue_limit = max(queue_limit, 1)
-        self._limiter = limiter or ChatRateLimiter()
+        # По умолчанию — общий лимитёр бота: карточки ревью, лидов и дайджест
+        # отмечаются в нём, и карточки совпадений им уступают.
+        self._limiter = limiter if limiter is not None else notifier.limiter
         self._ops: deque[_Op] = deque()
         self._wakeup = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
@@ -431,20 +613,37 @@ class MatchLogReporter:
         # Счётчики для журнала: потери не бывают молчаливыми.
         self.dropped_cards = 0
         self.dropped_updates = 0
+        self.dropped_notes = 0
         self.throttled = 0
+        self.requeued = 0
         self.failed = 0
 
     # --- вызывается из конвейера (синхронно, без исключений) -------------------
-    def open_card(self, message: NormalizedMessage, match: RuleMatch) -> MatchCard | None:
+    def open_card(
+        self,
+        message: NormalizedMessage,
+        match: RuleMatch,
+        *,
+        also_matched: Sequence[str] = (),
+    ) -> MatchCard | None:
         """Ставит в очередь карточку совпадения и возвращает ссылку на неё."""
-        if self._closed:
-            return None
         try:
+            if self._closed:
+                # Воркер уже останавливается: карточки не будет — но не молча.
+                self.dropped_cards += 1
+                logger.warning(
+                    "match_log_closed_dropped",
+                    kind="post",
+                    rule=match.rule.name,
+                    dropped_cards=self.dropped_cards,
+                )
+                return None
             card = MatchCard(
                 reporter=self,
                 rule_id=match.rule.id,
                 rule_name=match.rule.name,
                 message=message,
+                also_matched=tuple(also_matched),
             )
             self._enqueue(_Op("post", card))
         except Exception:  # лог-чат вторичен, ответ важнее
@@ -458,6 +657,17 @@ class MatchLogReporter:
             # не нужна. Выключено/выброшено — править нечего.
             if card.state in (CardState.QUEUED, CardState.SKIPPED, CardState.DROPPED):
                 return
+            if card.state is CardState.HELD:
+                # Режим «каждое совпадение» выключен: ждём итога и шлём
+                # карточку, только если ответ отправлен (как было раньше).
+                if not card.final:
+                    return
+                if card.replied:
+                    card.state = CardState.QUEUED
+                    self._enqueue(_Op("post", card))
+                else:
+                    card.state = CardState.SKIPPED
+                return
             if card.update_queued:
                 return  # задание уже в очереди и возьмёт свежий итог
             self._enqueue(_Op("update", card))
@@ -467,10 +677,13 @@ class MatchLogReporter:
     def _enqueue(self, op: _Op) -> None:
         if self._closed:
             if op.kind == "post":
+                op.card.state = CardState.DROPPED
                 self.dropped_cards += 1
-            else:
+            elif op.kind == "update":
                 self.dropped_updates += 1
-            logger.warning("match_log_closed_dropped", kind=op.kind)
+            else:
+                self.dropped_notes += 1
+            logger.warning("match_log_closed_dropped", kind=op.kind, rule=op.card.rule_name)
             return
         if len(self._ops) >= self._queue_limit:
             self._drop_oldest()
@@ -482,26 +695,32 @@ class MatchLogReporter:
             self._task = asyncio.get_running_loop().create_task(self._run(), name="match-log")
 
     def _drop_oldest(self) -> None:
-        """Переполнение: выбрасываем самую старую неотправленную карточку.
+        """Переполнение: выбрасываем наименее ценное из самого старого.
 
-        Если в очереди одни правки уже отправленных карточек — самую старую
-        правку (карточка останется с прежним итогом).
+        Сначала строку в общий поток (карточка с итогом уже в топике правила),
+        потом самую старую неотправленную карточку, а если в очереди одни
+        правки — самую старую правку (карточка останется с прежним итогом).
         """
-        index = next((i for i, op in enumerate(self._ops) if op.kind == "post"), 0)
+        index = next((i for i, op in enumerate(self._ops) if op.kind == "mirror"), None)
+        if index is None:
+            index = next((i for i, op in enumerate(self._ops) if op.kind == "post"), 0)
         victim = self._ops[index]
         del self._ops[index]
         if victim.kind == "post":
             victim.card.state = CardState.DROPPED
             self.dropped_cards += 1
-        else:
+        elif victim.kind == "update":
             victim.card.update_queued = False
             self.dropped_updates += 1
+        else:
+            self.dropped_notes += 1
         logger.warning(
             "match_log_queue_overflow",
             dropped_kind=victim.kind,
             rule=victim.card.rule_name,
             dropped_cards=self.dropped_cards,
             dropped_updates=self.dropped_updates,
+            dropped_notes=self.dropped_notes,
             queue_limit=self._queue_limit,
         )
 
@@ -539,30 +758,75 @@ class MatchLogReporter:
             try:
                 if op.kind == "post":
                     await self._post(op.card)
-                else:
+                elif op.kind == "update":
                     op.card.update_queued = False
                     await self._update(op.card)
+                else:
+                    await self._mirror(op.card)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — одна карточка не роняет очередь
                 self.failed += 1
                 logger.warning("match_log_failed", kind=op.kind, detail=str(exc)[:200])
 
+    def _requeue(
+        self,
+        card: MatchCard,
+        kind: Literal["post", "update", "mirror"],
+        exc: BaseException,
+        *,
+        any_error: bool = False,
+    ) -> bool:
+        """Временный сбой: задание — в конец очереди (не больше MAX_REQUEUES раз).
+
+        False — повторять не будем (сбой не временный или попытки кончились).
+        """
+        if not (any_error or is_transient(exc)) or card.attempts >= MAX_REQUEUES:
+            return False
+        card.attempts += 1
+        self.requeued += 1
+        logger.warning(
+            "match_log_requeued",
+            kind=kind,
+            attempt=card.attempts,
+            requeued=self.requeued,
+            detail=str(exc)[:200],
+        )
+        if kind == "post":
+            card.state = CardState.QUEUED
+        elif kind == "update" and card.update_queued:
+            return True  # свежий итог уже в очереди — он и уйдёт
+        self._enqueue(_Op(kind, card))
+        return True
+
     async def _post(self, card: MatchCard) -> None:
         if card.state is not CardState.QUEUED:
             return
         card.state = CardState.POSTING
-        try:
-            resolved = await self._resolve(card)
-        except Exception as exc:  # noqa: BLE001 — база/Bot API недоступны
-            card.state = CardState.FAILED
-            self.failed += 1
-            logger.warning("match_log_target_failed", detail=str(exc)[:200])
-            return
-        if resolved is None:
-            card.state = CardState.SKIPPED
+        if card.target is None:
+            try:
+                resolved = await self._resolve(card)
+            except Exception as exc:  # noqa: BLE001 — база/Bot API недоступны
+                if self._requeue(card, "post", exc, any_error=True):
+                    return
+                card.state = CardState.FAILED
+                self.failed += 1
+                logger.warning("match_log_target_failed", detail=str(exc)[:200])
+                return
+            if resolved is None:
+                card.state = CardState.SKIPPED
+                return
+        if not self._wanted(card):
             return
         await self._post_new(card)
+
+    def _wanted(self, card: MatchCard) -> bool:
+        """Режим «каждое совпадение» выключен — карточка только об ответе."""
+        assert card.target is not None
+        if card.target.all_matches or (card.final and card.replied):
+            return True
+        card.state = CardState.SKIPPED if card.final else CardState.HELD
+        return False
 
     async def _post_new(self, card: MatchCard) -> None:
         """Отправляет карточку целиком (с текущим итогом) новым сообщением."""
@@ -575,17 +839,26 @@ class MatchLogReporter:
                 target, lambda: self._notifier.send_log_card(target, text)
             )
         except Exception as exc:  # noqa: BLE001 — итог попробуем прислать позже
+            # Таймаут чтения: карточка могла и дойти — тогда повтор даст
+            # дубль. Лучше дубль, чем совпадение, пропавшее из лог-чата.
+            if self._requeue(card, "post", exc):
+                return
             card.state = CardState.FAILED
             self.failed += 1
             logger.warning("match_card_send_failed", detail=str(exc)[:200])
             await self._record_error(f"карточка совпадения: {exc}")
             return
         card.message_id = message_id
-        card.shown_result = shown
         card.state = CardState.POSTED
+        await self._shown(card, shown)
 
     async def _update(self, card: MatchCard) -> None:
-        if card.state in (CardState.QUEUED, CardState.SKIPPED, CardState.DROPPED):
+        if card.state in (
+            CardState.QUEUED,
+            CardState.SKIPPED,
+            CardState.DROPPED,
+            CardState.HELD,
+        ):
             return
         if card.result is None or card.result == card.shown_result:
             return  # итог уже виден (ушёл вместе с карточкой)
@@ -597,9 +870,12 @@ class MatchLogReporter:
                         card.state = CardState.SKIPPED
                         return
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("match_log_target_failed", detail=str(exc)[:200])
+                    if not self._requeue(card, "update", exc, any_error=True):
+                        self.failed += 1
+                        logger.warning("match_log_target_failed", detail=str(exc)[:200])
                     return
-            await self._post_new(card)
+            if self._wanted(card):
+                await self._post_new(card)
             return
 
         target = card.target
@@ -612,26 +888,92 @@ class MatchLogReporter:
                 await self._with_retry(
                     target, lambda: self._notifier.edit_log_card(target, message_id, text)
                 )
-                card.shown_result = shown
-                return
-            except NotifyRateLimitError as exc:
-                # Лимит не отпустил и после повтора: ответом было бы то же самое.
-                self.failed += 1
-                logger.warning("match_card_edit_throttled", detail=str(exc)[:200])
-                return
-            except Exception as exc:  # noqa: BLE001 — старое/удалённое сообщение
-                card.edit_broken = True
+            except Exception as exc:  # noqa: BLE001
+                if self._requeue(card, "update", exc):
+                    return  # 429/5xx/сеть — правку повторим (уже ушедшая даст «not modified»)
+                if is_transient(exc):
+                    self.failed += 1
+                    logger.warning("match_card_edit_gave_up", detail=str(exc)[:200])
+                    await self._record_error(f"итог карточки совпадения: {exc}")
+                    return
+                if is_uneditable(exc):
+                    card.edit_broken = True  # дальше итог сразу ответом
                 logger.info("match_card_edit_failed_reply_instead", detail=str(exc)[:200])
+            else:
+                await self._shown(card, shown)
+                return
         try:
             await self._with_retry(
                 target,
                 lambda: self._notifier.send_log_card(target, shown, reply_to=message_id),
             )
-            card.shown_result = shown
         except Exception as exc:  # noqa: BLE001
+            if self._requeue(card, "update", exc):
+                return
             self.failed += 1
             logger.warning("match_card_result_failed", detail=str(exc)[:200])
             await self._record_error(f"итог карточки совпадения: {exc}")
+            return
+        await self._shown(card, shown)
+
+    async def _shown(self, card: MatchCard, shown: str | None) -> None:
+        """Итог дошёл до группы: общий поток и ссылка у ревью — по разу."""
+        card.shown_result = shown
+        card.attempts = 0
+        if not card.final or shown != card.result:
+            return  # свежий итог ещё в пути
+        target = card.target
+        if (
+            card.replied
+            and not card.mirrored
+            and target is not None
+            and target.stream_thread_id is not None
+            and card.message_id is not None
+        ):
+            card.mirrored = True
+            self._enqueue(_Op("mirror", card))
+        if card.review_id is not None and not card.review_linked and card.message_id is not None:
+            await self._link_review(card)
+
+    async def _mirror(self, card: MatchCard) -> None:
+        """Строка об отправленном ответе в «Общение ИИ» со ссылкой на карточку."""
+        target = card.target
+        if target is None or target.stream_thread_id is None or card.message_id is None:
+            return
+        stream = LogTarget(
+            token=target.token, group_id=target.group_id, thread_id=target.stream_thread_id
+        )
+        text = format_stream_note(
+            head=card.note_head or SENT_HEAD,
+            rule_name=card.rule_name,
+            message=card.message,
+            card_link=message_link(target.group_id, card.message_id, None),
+        )
+        try:
+            await self._with_retry(stream, lambda: self._notifier.send_log_card(stream, text))
+        except Exception as exc:  # noqa: BLE001
+            if self._requeue(card, "mirror", exc):
+                return
+            self.failed += 1
+            logger.warning("match_card_stream_note_failed", detail=str(exc)[:200])
+
+    async def _link_review(self, card: MatchCard) -> None:
+        """Ответ на проверке: id карточки — в PendingReview, чтобы решение
+        оператора (кнопки, панель) дописалось к ней, а не повисло «на проверке»."""
+        assert card.target is not None
+        try:
+            async with self._database.session() as db:
+                await db.execute(
+                    update(PendingReview)
+                    .where(PendingReview.id == card.review_id)
+                    .values(
+                        match_card_message_id=card.message_id,
+                        match_card_thread_id=card.target.thread_id,
+                    )
+                )
+            card.review_linked = True
+        except Exception as exc:  # noqa: BLE001 — без ссылки просто не будет пометки
+            logger.warning("match_card_review_link_failed", detail=str(exc)[:200])
 
     async def _with_retry(self, target: LogTarget, call: Callable[[], Awaitable[T]]) -> T:
         """Вызов Bot API под лимитом; на 429 — ждём retry_after и ещё одна попытка."""
@@ -680,8 +1022,9 @@ class MatchLogReporter:
             sender_tg_id=message.sender_tg_id,
             incoming_text=message.text,
             date=message.date,
-            tz_offset_hours=self._tz_offset,
+            tz_offset_hours=self.tz_offset_hours,
             result=card.result,
+            also_matched=card.also_matched,
         )
 
     async def _record_error(self, detail: str) -> None:

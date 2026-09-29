@@ -54,6 +54,12 @@ class ActionResult:
     # Режим «чат + лс»: ответ в группу ушёл, а личка — нет. Действие при этом
     # успешно (ответ в чат уже отправлен), но в лог-чате это надо показать.
     dm_error: str | None = None
+    # Лид после ответа / SAVE_LEAD (статус COLD/WARM/HOT и балл) — для
+    # карточки совпадения в лог-чате.
+    lead_score: int | None = None
+    lead_status: str | None = None
+    # REQUEST_REVIEW: id заявки на проверку (к ней привязывается карточка).
+    review_id: uuid.UUID | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -113,6 +119,9 @@ class ActionEngine:
             detail=result.detail,
             sent_tg_message_id=result.sent_tg_message_id,
             dm_error=result.dm_error,
+            lead_score=result.lead_score,
+            lead_status=result.lead_status,
+            review_id=result.review_id,
         )
 
     async def _persist(self, request: ActionRequest) -> tuple[uuid.UUID, bool]:

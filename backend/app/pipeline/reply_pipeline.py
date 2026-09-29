@@ -36,14 +36,13 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import html
 import math
 import random
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from sqlalchemy import Select, and_, or_, select
 
@@ -72,6 +71,7 @@ from app.models import (
     Rule,
     Scenario,
 )
+from app.notifications.match_log import failed_line, skipped_line, unknown_line
 from app.rules.engine import CooldownSpec, RuleMatch
 from app.rules.filters import StopGuard
 from app.telegram.messages import NormalizedMessage
@@ -137,8 +137,15 @@ class ReplyOutcome:
     # Сбой самой ОТПРАВКИ (Telegram, аккаунт не подключён, падение во время
     # отправки): отличает «не удалось отправить» от «решили не отправлять».
     send_error: str | None = None
+    # Отправку прервали на середине (отмена задачи): ответ мог и уйти.
+    send_unknown: bool = False
     # Пауза сценария: через сколько уйдёт (PENDING) или сколько ждали (итог).
     delay_seconds: float | None = None
+    # Лид после ответа / SAVE_LEAD: статус (COLD/WARM/HOT) и балл.
+    lead_score: int | None = None
+    lead_status: str | None = None
+    # Ответ ушёл на проверку оператору: id заявки (PendingReview).
+    review_id: uuid.UUID | None = None
 
     @property
     def replied(self) -> bool:
@@ -814,6 +821,7 @@ class ReplyPipeline:
                 action_id=result.action_id,
                 analysis=analysis,
                 validation=verdict,
+                review_id=result.review_id,
             )
 
         # Своя пауза сценария. «Один заход» при паузе столбим атомарно ДО
@@ -935,7 +943,9 @@ class ReplyPipeline:
                 validation=prepared.verdict,
                 conversation_id=prepared.conversation_id,
             )
-            return dataclasses.replace(escalated, send_error=result.detail or result.status.value)
+            return dataclasses.replace(
+                escalated, send_error=result.detail or "неизвестная ошибка отправки"
+            )
 
         dm_text = prepared.request.payload.get("dm_text")
         return ReplyOutcome(
@@ -949,6 +959,8 @@ class ReplyPipeline:
             dm_text=str(dm_text) if dm_text else None,
             dm_error=result.dm_error,
             delay_seconds=prepared.delay or None,
+            lead_score=result.lead_score,
+            lead_status=result.lead_status,
         )
 
     # --- отложенная отправка (задержка сценария) ---------------------------
@@ -1074,13 +1086,14 @@ class ReplyPipeline:
             outcome = await self._deliver(prepared)
         except asyncio.CancelledError:
             # Отправка уже шла — ответ мог уйти. Кулдаун не снимаем, чтобы не
-            # ответить дважды; оператор проверит диалог.
+            # ответить дважды; оператор проверит диалог. В карточке — «⚠️
+            # неизвестно, ушёл ли», а не «❌ не удалось»: этого мы не знаем.
             await self._finish_given_up(
                 prepared,
                 "отложенный ответ прерван во время отправки "
                 f"({job.cancel_reason or 'задача отменена'}) — проверьте диалог",
                 release_cooldown=False,
-                send_failed=True,
+                send="unknown",
             )
             raise
         except Exception as exc:
@@ -1089,7 +1102,7 @@ class ReplyPipeline:
                 prepared,
                 f"отложенный ответ упал: {type(exc).__name__}: {exc}",
                 release_cooldown=False,
-                send_failed=True,
+                send="failed",
             )
             return
 
@@ -1144,6 +1157,7 @@ class ReplyPipeline:
 
     async def _finish_skipped(self, prepared: _PreparedReply, reason: str) -> None:
         """После паузы ответ больше не нужен: снимаем застолбленное, пишем IGNORE."""
+        reported = False
         try:
             await self._release_unsent(prepared)
             outcome = await self._ignore(
@@ -1155,10 +1169,17 @@ class ReplyPipeline:
                 analysis=prepared.analysis,
             )
             _report(prepared, outcome)
+            reported = True
             await self._set_message_status(prepared, outcome.processed_status, reason)
+        except asyncio.CancelledError:
+            # Отмена посреди уборки: итог в карточку всё равно — и отмену дальше.
+            if not reported:
+                _report_line(prepared, skipped_line(reason))
+            raise
         except Exception:
             logger.exception("delayed_reply_cleanup_failed", **prepared.message.for_log())
-            _report_line(prepared, f"⏭ Не отправляли: {reason}")
+            if not reported:
+                _report_line(prepared, skipped_line(reason))
 
     async def _give_up(
         self, prepared: _PreparedReply, reason: str, *, release_cooldown: bool
@@ -1185,23 +1206,34 @@ class ReplyPipeline:
         reason: str,
         *,
         release_cooldown: bool,
-        send_failed: bool = False,
+        send: Literal["none", "failed", "unknown"] = "none",
     ) -> None:
         """_give_up + итоговый статус сообщения; уборка не должна падать сама.
 
-        send_failed — отправка уже началась и сорвалась (в карточке это «не
-        удалось отправить», а не «не отправляли»).
+        send — что было с отправкой: none — до неё не дошло («не
+        отправляли»), failed — началась и сорвалась («не удалось
+        отправить»), unknown — прервана на середине («неизвестно, ушёл ли»).
         """
+        # Итог уже в карточке — упавшая следом запись статуса его не перетирает.
+        reported = False
         try:
             outcome = await self._give_up(prepared, reason, release_cooldown=release_cooldown)
-            if send_failed:
-                outcome = dataclasses.replace(outcome, send_error=reason)
+            if send != "none":
+                outcome = dataclasses.replace(
+                    outcome, send_error=reason, send_unknown=send == "unknown"
+                )
             _report(prepared, outcome)
+            reported = True
             await self._set_message_status(prepared, outcome.processed_status, reason)
+        except asyncio.CancelledError:
+            # Отмена посреди уборки: итог в карточку всё равно — и отмену дальше.
+            if not reported:
+                _report_line(prepared, _given_up_line(send, reason))
+            raise
         except Exception:
             logger.exception("delayed_reply_cleanup_failed", **prepared.message.for_log())
-            prefix = "❌ Не удалось отправить" if send_failed else "⏭ Не отправляли"
-            _report_line(prepared, f"{prefix}: {reason} · передать оператору не удалось")
+            if not reported:
+                _report_line(prepared, _given_up_line(send, reason))
 
     def _on_delayed_done(self, task: asyncio.Task[None]) -> None:
         self._delayed.pop(task, None)
@@ -1324,6 +1356,8 @@ class ReplyPipeline:
             status=result.status,
             reason=result.detail,
             action_id=result.action_id,
+            lead_score=result.lead_score,
+            lead_status=result.lead_status,
         )
 
     async def _ignore(
@@ -1605,9 +1639,19 @@ def _report(prepared: _PreparedReply, outcome: ReplyOutcome) -> None:
 
 
 def _report_line(prepared: _PreparedReply, line: str) -> None:
-    """Запасной итог, когда ReplyOutcome получить не удалось (уборка упала)."""
+    """Запасной итог, когда ReplyOutcome получить не удалось (уборка упала).
+
+    line — готовый HTML (skipped_line/failed_line/…: причина уже очеловечена,
+    обрезана и экранирована — в ней бывает текст исключения с SQL).
+    """
     if prepared.card is not None:
-        prepared.card.report_line(html.escape(line, quote=False))
+        prepared.card.report_line(line)
+
+
+def _given_up_line(send: Literal["none", "failed", "unknown"], reason: str) -> str:
+    """Запасной итог отказа от отложенного ответа, когда эскалация не удалась."""
+    line = {"none": skipped_line, "failed": failed_line, "unknown": unknown_line}[send](reason)
+    return f"{line} · ⚠️ передать оператору не удалось"
 
 
 def _one_shot_pending_key(account_id: uuid.UUID, peer_tg_id: int) -> str:

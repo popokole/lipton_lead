@@ -114,7 +114,9 @@ class ReplyHandler:
                     detail=detail,
                 )
 
-        await self._record_reply(request, sent.tg_message_id, dm_message_id=dm_message_id)
+        lead_score, lead_status = await self._record_reply(
+            request, sent.tg_message_id, dm_message_id=dm_message_id
+        )
         await self.publisher.publish(
             Event(
                 type=EventType.ACTION_SENT,
@@ -134,15 +136,23 @@ class ReplyHandler:
             tg_message_id=sent.tg_message_id,
         )
         return ActionResult(
-            status=ActionStatus.SENT, sent_tg_message_id=sent.tg_message_id, dm_error=dm_error
+            status=ActionStatus.SENT,
+            sent_tg_message_id=sent.tg_message_id,
+            dm_error=dm_error,
+            lead_score=lead_score,
+            lead_status=lead_status,
         )
 
     async def _record_reply(
         self, request: ActionRequest, tg_message_id: int, *, dm_message_id: int | None = None
-    ) -> None:
+    ) -> tuple[int | None, str | None]:
+        """Пишет ответ в базу и заводит лида; возвращает (балл, статус) лида
+        после обновления — их показывает карточка совпадения в лог-чате."""
         from app.models import Message
 
         assert request.message is not None
+        lead_score: int | None = None
+        lead_status: str | None = None
         async with self.database.session() as db:
             db.add(
                 Message(
@@ -251,6 +261,8 @@ class ReplyHandler:
                         payload={"score": lead.score, "status": lead.status.value},
                     )
                 )
+                lead_score, lead_status = lead.score, lead.status.value
+        return lead_score, lead_status
 
 
 @dataclass
@@ -298,7 +310,9 @@ class ReviewHandler:
                 status="REVIEW",
                 extra={"confidence": confidence},
             )
-        return ActionResult(status=ActionStatus.SENT, detail="на подтверждении")
+        return ActionResult(
+            status=ActionStatus.SENT, detail="на подтверждении", review_id=review.id
+        )
 
 
 @dataclass
@@ -376,7 +390,14 @@ class SaveLeadHandler:
             lead_status = lead.status.value
             lead_score = lead.score
 
-            if self.notifier is not None and request.rule_id is not None:
+            # Карточка на каждое совпадение (log_all_matches) уже покажет лида с
+            # баллом — отдельная карточка лида была бы вторым сообщением о том
+            # же. Выключен режим — как раньше, своя карточка лида.
+            if (
+                self.notifier is not None
+                and request.rule_id is not None
+                and not await self.notifier.log_all_matches_enabled(db)
+            ):
                 allowed = True
                 if self.cooldown is not None:
                     key = (
@@ -418,7 +439,12 @@ class SaveLeadHandler:
                 payload={"score": lead_score, "status": lead_status},
             )
         )
-        return ActionResult(status=ActionStatus.SENT, detail=f"{lead_status} ({lead_score})")
+        return ActionResult(
+            status=ActionStatus.SENT,
+            detail=f"{lead_status} ({lead_score})",
+            lead_score=lead_score,
+            lead_status=lead_status,
+        )
 
 
 @dataclass

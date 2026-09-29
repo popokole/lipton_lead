@@ -52,6 +52,11 @@ class PendingReview(UUIDPrimaryKeyMixin, Base):
     status: Mapped[str] = mapped_column(sa.String(16), nullable=False, default="pending")
     # id карточки в лог-чате, чтобы отредактировать её после решения.
     notify_message_id: Mapped[int | None] = mapped_column(TelegramId)
+    # Карточка совпадения (MatchLogReporter) в топике правила или «Общение
+    # ИИ»: решение оператора дописывается к ней ответом, иначе она навсегда
+    # осталась бы «на проверке у оператора».
+    match_card_message_id: Mapped[int | None] = mapped_column(TelegramId)
+    match_card_thread_id: Mapped[int | None] = mapped_column(TelegramId)
 
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False

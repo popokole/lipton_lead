@@ -30,25 +30,33 @@ from app.api.v1 import notify as notify_api
 from app.core.crypto import build_secret_box
 from app.models import ActionStatus, ActionType, ChatType, Rule, RuleScope
 from app.models.notify import SINGLETON_ID, NotifySettings
+from app.models.review import PendingReview
 from app.notifications.match_log import (
     MAX_INCOMING_CHARS,
+    MAX_REASON_CHARS,
+    MAX_REQUEUES,
     PENDING_LINE,
     TELEGRAM_TEXT_LIMIT,
     CardState,
-    ChatRateLimiter,
     MatchCard,
     MatchLogReporter,
     clip,
     crash_line,
+    failed_line,
+    format_duration,
     format_match_card,
     humanize_reason,
     outcome_line,
+    skipped_line,
+    unknown_line,
 )
 from app.notifications.notifier import (
+    ChatRateLimiter,
     LogTarget,
     NotifierBot,
     NotifyError,
     NotifyRateLimitError,
+    NotifyTransientError,
 )
 from app.pipeline.reply_pipeline import ReplyOutcome
 from app.rules.engine import CompiledRule, CooldownSpec, RuleMatch
@@ -61,7 +69,10 @@ ACCOUNT = uuid.uuid4()
 RULE_ID = uuid.uuid4()
 GROUP = -100_777
 THREAD = 55
-PREFIXES = ("✅", "❌", "⏭", "🟡", "⏳")
+PREFIXES = ("✅", "❌", "⏭", "🟡", "⏳", "⚠️", "🎯")
+#: Машинные значения, которых оператор в карточке видеть не должен.
+RAW_VALUES = ("FAILED", "REJECTED", "PENDING", "CANCELLED", "SENDING", "duplicate")
+NOW = datetime(2026, 9, 29, 9, 5, 0, tzinfo=UTC)
 
 
 # --- сборка ------------------------------------------------------------------
@@ -137,8 +148,24 @@ def outcome(action: ActionType, status: ActionStatus, **fields: Any) -> ReplyOut
     return ReplyOutcome(action=action, status=status, **fields)
 
 
-def analysis(confidence: float) -> Any:
-    return SimpleNamespace(failed=False, result=SimpleNamespace(confidence=confidence))
+def analysis(
+    confidence: float,
+    *,
+    relevant: bool = True,
+    reason: str = "",
+    needs_human: bool = False,
+    threshold: float = 0.6,
+    failed: bool = False,
+    failure_reason: str | None = None,
+) -> Any:
+    return SimpleNamespace(
+        failed=failed,
+        failure_reason=failure_reason,
+        threshold=threshold,
+        result=SimpleNamespace(
+            confidence=confidence, relevant=relevant, reason=reason, needs_human=needs_human
+        ),
+    )
 
 
 # --- текст карточки ----------------------------------------------------------------
@@ -211,6 +238,13 @@ class TestCardText:
         text = card_text(make_message(text="&" * 2000))
         assert re.findall(r"&(?!amp;|lt;|gt;|quot;|#)", text) == []
 
+    def test_other_matched_rules_are_listed(self) -> None:
+        text = card_text(also_matched=["Дизайн <b>", "Логотипы"])
+        header, also = text.split("\n")[:2]
+        assert header.startswith("🔔 <b>Совпадение</b> · Поиск клиентов")
+        assert also == "➕ Также совпали: Дизайн &lt;b&gt;, Логотипы"
+        assert "Также совпали" not in card_text(), "одно правило — без строки"
+
     def test_worst_case_card_fits_the_telegram_limit(self) -> None:
         huge = "😀" * 5000  # эмодзи — две единицы UTF-16 каждый
         message = make_message(
@@ -220,13 +254,36 @@ class TestCardText:
             outcome(
                 ActionType.REPLY,
                 ActionStatus.SENT,
+                reason="duplicate",
                 reply_text=huge,
                 dm_text=huge,
+                dm_error=huge,
                 analysis=analysis(0.9),
                 delay_seconds=3600,
+                lead_score=100,
+                lead_status=huge,
             )
         )
-        text = card_text(message, rule_name=huge, account_label=huge, result=result)
+        text = card_text(
+            message,
+            rule_name=huge,
+            account_label=huge,
+            result=result,
+            also_matched=[huge] * 30,
+        )
+        assert utf16(visible(text)) < TELEGRAM_TEXT_LIMIT
+
+    def test_worst_case_skip_with_ai_explanation_fits(self) -> None:
+        huge = "😀" * 5000
+        result = outcome_line(
+            outcome(
+                ActionType.ESCALATE_TO_HUMAN,
+                ActionStatus.FAILED,
+                reason="низкая уверенность AI (0.45 < 0.60)",
+                analysis=analysis(0.45, reason=huge),
+            )
+        )
+        text = card_text(make_message(text=huge), rule_name=huge, result=result)
         assert utf16(visible(text)) < TELEGRAM_TEXT_LIMIT
 
     def test_clip_never_splits_an_emoji(self) -> None:
@@ -242,9 +299,18 @@ class TestOutcomeLine:
     def test_every_action_and_status_has_a_line(
         self, action: ActionType, status: ActionStatus
     ) -> None:
-        line = outcome_line(outcome(action, status, reason="сбой <x> & y"))
+        line = outcome_line(outcome(action, status, reason="сбой <x> & y"), now=NOW)
         assert line.startswith(PREFIXES)
         assert "<x>" not in line, "причина экранируется"
+
+    @pytest.mark.parametrize("action", list(ActionType))
+    @pytest.mark.parametrize("status", list(ActionStatus))
+    def test_no_raw_machine_values_without_a_reason(
+        self, action: ActionType, status: ActionStatus
+    ) -> None:
+        line = outcome_line(outcome(action, status), now=NOW)
+        assert line.startswith(PREFIXES)
+        assert not any(raw in line for raw in RAW_VALUES), line
 
     def test_sent_reply_shows_the_text(self) -> None:
         line = outcome_line(
@@ -259,6 +325,18 @@ class TestOutcomeLine:
         assert "<b>Наш ответ:</b>" in line
         assert "Здравствуйте! &lt;b&gt;Скидка&lt;/b&gt;" in line
 
+    def test_sent_reply_shows_the_lead_status_and_score(self) -> None:
+        line = outcome_line(
+            outcome(
+                ActionType.REPLY,
+                ActionStatus.SENT,
+                reply_text="Здравствуйте!",
+                lead_score=87,
+                lead_status="HOT",
+            )
+        )
+        assert line.split("\n")[:2] == ["✅ Ответ отправлен", "🎯 Лид · HOT (87)"]
+
     def test_sent_reply_in_chat_and_dm(self) -> None:
         line = outcome_line(
             outcome(
@@ -268,33 +346,57 @@ class TestOutcomeLine:
                 dm_text="Развёрнутый ответ",
             )
         )
+        assert line.startswith("✅ Ответ отправлен")
         assert "<b>В чат:</b>\nОтправлю в лс" in line
         assert "<b>В личку:</b>\nРазвёрнутый ответ" in line
 
-    def test_failed_dm_is_shown(self) -> None:
+    def test_failed_dm_is_not_a_success_and_keeps_the_text(self) -> None:
         line = outcome_line(
             outcome(
                 ActionType.REPLY,
                 ActionStatus.SENT,
                 reply_text="Отправлю в лс",
-                dm_text="Развёрнутый ответ",
+                dm_text="Развёрнутый <ответ>",
                 dm_error="PrivacyRestricted",
             )
         )
-        assert line.startswith("✅ Ответ отправлен")
-        assert "⚠️ Личка не ушла: PrivacyRestricted" in line
-        assert "Развёрнутый ответ" not in line
+        assert line.startswith("⚠️ В чат ушло, личка НЕ ушла: PrivacyRestricted")
+        assert "✅" not in line
+        assert "<b>В чат:</b>\nОтправлю в лс" in line
+        # Текст лички — чтобы оператор мог отправить его вручную.
+        assert "<b>В личку (не доставлено):</b>\nРазвёрнутый &lt;ответ&gt;" in line
 
     def test_delayed_and_duplicate_marks(self) -> None:
         line = outcome_line(
             outcome(ActionType.REPLY, ActionStatus.SENT, reason="duplicate", delay_seconds=30.4)
         )
-        assert "(после паузы 30 с)" in line
-        assert "повтор" in line
+        assert "(после паузы 30 с, повтор: этот ответ уже уходил раньше)" in line
+        assert "duplicate" not in line
 
-    def test_scheduled_reply(self) -> None:
-        line = outcome_line(outcome(ActionType.REPLY, ActionStatus.PENDING, delay_seconds=30.4))
-        assert line == "⏳ Ответ запланирован через 30 с"
+    def test_scheduled_reply_shows_the_duration_and_local_time(self) -> None:
+        line = outcome_line(
+            outcome(ActionType.REPLY, ActionStatus.PENDING, delay_seconds=2847),
+            tz_offset_hours=3,
+            now=NOW,
+        )
+        # 09:05 UTC + 47 мин 27 с + 3 часа = 12:52 по местному.
+        assert line == "⏳ Ответ запланирован через 47 мин 27 с (≈ в 12:52)"
+
+    @pytest.mark.parametrize(
+        ("seconds", "text"),
+        [
+            (0, "0 с"),
+            (30.4, "30 с"),
+            (59.6, "1 мин"),
+            (125, "2 мин 5 с"),
+            (2847, "47 мин 27 с"),
+            (3600, "1 ч"),
+            (3725, "1 ч 2 мин 5 с"),
+            (None, "? с"),
+        ],
+    )
+    def test_durations_are_human_readable(self, seconds: float | None, text: str) -> None:
+        assert format_duration(seconds) == text
 
     @pytest.mark.parametrize(
         "status", [ActionStatus.FAILED, ActionStatus.REJECTED, ActionStatus.CANCELLED]
@@ -313,6 +415,32 @@ class TestOutcomeLine:
             )
         )
         assert line == "❌ Не удалось отправить: Telegram просит подождать 30с · передано оператору"
+
+    def test_send_failure_whose_hand_off_failed_too(self) -> None:
+        line = outcome_line(
+            outcome(
+                ActionType.ESCALATE_TO_HUMAN,
+                ActionStatus.FAILED,
+                reason="не удалось отправить ответ: fake",
+                send_error="fake",
+            )
+        )
+        assert line == "❌ Не удалось отправить: fake · ⚠️ передать оператору не удалось (сбой)"
+        assert "передано оператору" not in line
+
+    def test_interrupted_send_is_unknown_not_failed(self) -> None:
+        reason = "отложенный ответ прерван во время отправки (остановка воркера) — проверьте диалог"
+        line = outcome_line(
+            outcome(
+                ActionType.ESCALATE_TO_HUMAN,
+                ActionStatus.SENT,
+                reason=reason,
+                send_error=reason,
+                send_unknown=True,
+            )
+        )
+        assert line == f"⚠️ Неизвестно, ушёл ли ответ: {reason} · передано оператору"
+        assert "❌" not in line
 
     def test_review_mentions_the_operator(self) -> None:
         line = outcome_line(
@@ -355,6 +483,8 @@ class TestOutcomeLine:
                 "стоп-лист: отправитель добавлен во время паузы",
                 "стоп-лист: отправитель добавлен во время паузы",
             ),
+            ("duplicate", "уже выполнялось раньше"),
+            ("FAILED", "сбой"),
         ],
     )
     def test_ignore_reasons_are_human_readable(self, reason: str, expected: str) -> None:
@@ -362,17 +492,103 @@ class TestOutcomeLine:
         line = outcome_line(outcome(ActionType.IGNORE, ActionStatus.SENT, reason=reason))
         assert line == f"⏭ Не отправляли: {html.escape(expected, quote=False)}"
 
+    def test_ai_says_not_a_lead_with_high_confidence(self) -> None:
+        """Уверенное «нет» — не «уверенность выше порога, но не ответили»."""
+        line = outcome_line(
+            outcome(
+                ActionType.IGNORE,
+                ActionStatus.SENT,
+                reason="AI: не отвечать (confidence 0.95, порог 0.60)",
+                analysis=analysis(0.95, relevant=False, reason="Человек сам <предлагает> услуги"),
+            )
+        )
+        assert line == (
+            "⏭ Не отправляли: ИИ — не лид (уверенность 0.95)\n"
+            "ИИ: Человек сам &lt;предлагает&gt; услуги"
+        )
+
+    def test_ai_is_not_sure_enough(self) -> None:
+        line = outcome_line(
+            outcome(
+                ActionType.IGNORE,
+                ActionStatus.SENT,
+                reason="AI: не отвечать (confidence 0.45, порог 0.60)",
+                analysis=analysis(0.45, relevant=True),
+            )
+        )
+        assert line == "⏭ Не отправляли: ИИ не уверен: 0.45 &lt; порога 0.60"
+
+    def test_ai_explanation_is_clipped(self) -> None:
+        line = outcome_line(
+            outcome(
+                ActionType.IGNORE,
+                ActionStatus.SENT,
+                reason="AI: не отвечать (confidence 0.95, порог 0.60)",
+                analysis=analysis(0.95, relevant=False, reason="я" * 5000),
+            )
+        )
+        note = line.split("\nИИ: ", 1)[1]
+        assert utf16(note) == MAX_REASON_CHARS and note.endswith("…")
+
+    def test_other_skip_reasons_do_not_blame_the_ai(self) -> None:
+        line = outcome_line(
+            outcome(
+                ActionType.IGNORE,
+                ActionStatus.SENT,
+                reason="cooldown: user",
+                analysis=analysis(0.9, reason="похоже на лида"),
+            )
+        )
+        assert line == "⏭ Не отправляли: кулдаун — этому человеку недавно уже отвечали"
+
+    def test_ai_failure_is_a_breakdown_not_a_decision(self) -> None:
+        line = outcome_line(
+            outcome(
+                ActionType.ESCALATE_TO_HUMAN,
+                ActionStatus.SENT,
+                reason="AIError: 502 Bad Gateway",
+                analysis=analysis(0.0, failed=True, failure_reason="AIError: 502 Bad Gateway"),
+            )
+        )
+        assert line == "⏭ Не отправляли: сбой ИИ — AIError: 502 Bad Gateway · передано оператору"
+
+    def test_low_confidence_escalation(self) -> None:
+        line = outcome_line(
+            outcome(
+                ActionType.ESCALATE_TO_HUMAN,
+                ActionStatus.SENT,
+                reason="низкая уверенность AI (0.45 < 0.60)",
+                analysis=analysis(0.45, reason="неясно, ищет ли услугу"),
+            )
+        )
+        assert line == (
+            "⏭ Не отправляли: ИИ не уверен: 0.45 &lt; порога 0.60 · передано оператору\n"
+            "ИИ: неясно, ищет ли услугу"
+        )
+
+    def test_model_asks_for_a_human(self) -> None:
+        line = outcome_line(
+            outcome(
+                ActionType.ESCALATE_TO_HUMAN,
+                ActionStatus.SENT,
+                reason="жалоба на сервис",
+                analysis=analysis(0.9, needs_human=True, reason="жалоба на сервис"),
+            )
+        )
+        assert line == (
+            "⏭ Не отправляли: ИИ просит передать диалог человеку · передано оператору\n"
+            "ИИ: жалоба на сервис"
+        )
+
     def test_ignore_whose_journal_write_failed(self) -> None:
         line = outcome_line(
             outcome(ActionType.IGNORE, ActionStatus.FAILED, reason="вне рабочих часов")
         )
-        assert line.startswith("⏭ Не отправляли: вне рабочих часов")
-        assert "FAILED" in line
+        assert line == "⏭ Не отправляли: вне рабочих часов (⚠️ запись в журнал не удалась: сбой)"
 
     @pytest.mark.parametrize(
         "reason",
         [
-            "низкая уверенность AI (0.30 < 0.70)",
             "модель просит передать человеку",
             "AI не настроен, нужен оператор",
             "нет сценария для ответа",
@@ -388,25 +604,52 @@ class TestOutcomeLine:
         line = outcome_line(
             outcome(ActionType.ESCALATE_TO_HUMAN, ActionStatus.FAILED, reason="нужен оператор")
         )
-        assert "передать оператору не удалось (FAILED)" in line
+        assert line == "⏭ Не отправляли: нужен оператор · ⚠️ передать оператору не удалось (сбой)"
 
     @pytest.mark.parametrize(
         ("action", "label"),
         [
             (ActionType.NOTIFY_ADMIN, "уведомление в панель"),
-            (ActionType.SAVE_LEAD, "сохранить лида"),
             (ActionType.TAG_USER, "метка собеседнику"),
         ],
     )
     def test_rules_without_a_reply(self, action: ActionType, label: str) -> None:
-        done = outcome_line(outcome(action, ActionStatus.SENT, reason="HOT (80)"))
-        assert done == f"⏭ Не отправляли: правило без ответа — {label}: выполнено (HOT (80))"
+        done = outcome_line(outcome(action, ActionStatus.SENT, reason="city=Москва"))
+        assert done == f"⏭ Не отправляли: правило без ответа — {label}: выполнено (city=Москва)"
+        again = outcome_line(outcome(action, ActionStatus.SENT, reason="duplicate"))
+        assert again.endswith("выполнено (уже выполнялось раньше)")
         failed = outcome_line(outcome(action, ActionStatus.REJECTED, reason="нужны key и value"))
         assert failed == f"❌ Не удалось: {label} — нужны key и value"
+
+    def test_saved_lead_shows_its_status_and_score(self) -> None:
+        line = outcome_line(
+            outcome(
+                ActionType.SAVE_LEAD,
+                ActionStatus.SENT,
+                reason="WARM (55)",
+                lead_score=55,
+                lead_status="WARM",
+            )
+        )
+        assert line == "🎯 Лид сохранён · WARM (55) · правило без ответа"
+        again = outcome_line(outcome(ActionType.SAVE_LEAD, ActionStatus.SENT, reason="duplicate"))
+        assert again == "🎯 Лид сохранён (уже выполнялось раньше) · правило без ответа"
+        failed = outcome_line(
+            outcome(ActionType.SAVE_LEAD, ActionStatus.REJECTED, reason="неизвестен автор")
+        )
+        assert failed == "❌ Не удалось: сохранить лида — неизвестен автор"
 
     def test_crash_line_is_escaped(self) -> None:
         line = crash_line(RuntimeError("<boom>"))
         assert line == "❌ Не удалось отправить: обработка упала — RuntimeError: &lt;boom&gt;"
+
+    @pytest.mark.parametrize("make_line", [skipped_line, failed_line, unknown_line])
+    def test_fallback_lines_are_clipped_and_escaped(self, make_line: Any) -> None:
+        reason = "отложенный ответ не перепроверен: OperationalError: <SELECT " + "x" * 10_000
+        line = make_line(reason)
+        assert line.startswith(("⏭", "❌", "⚠️"))
+        assert "<SELECT" not in line and "&lt;SELECT" in line
+        assert utf16(visible(line)) < MAX_REASON_CHARS + 40
 
 
 # --- лимит Telegram ----------------------------------------------------------------
@@ -462,6 +705,16 @@ class TestChatRateLimiter:
         await limiter.acquire(GROUP)
         assert clock.sleeps, "19-я за минуту ждёт"
 
+    async def test_other_bot_messages_take_their_share(self) -> None:
+        """Ревью/лиды/дайджест идут без ожидания, но карточки им уступают."""
+        clock = FakeClock()
+        limiter = self._limiter(clock, max_per_window=3, window_seconds=60, min_interval_seconds=0)
+        for _ in range(3):
+            limiter.note(GROUP)
+        assert limiter.delay(GROUP) == 60
+        await limiter.acquire(GROUP)
+        assert clock.sleeps == [60.0]
+
 
 # --- очередь и отправка --------------------------------------------------------------
 class FakeNotifier:
@@ -469,7 +722,11 @@ class FakeNotifier:
 
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
+        # Топик каждого sendMessage (в том же порядке, что calls «send»).
+        self.threads: list[int | None] = []
         self.enabled = True
+        self.all_matches = True
+        self.stream_thread_id: int | None = None
         self.fail_send: list[Exception] = []
         self.fail_edit: list[Exception] = []
         self.gate: asyncio.Event | None = None
@@ -478,7 +735,15 @@ class FakeNotifier:
 
     async def log_target(self, _db: Any, *, rule_id: uuid.UUID | None) -> LogTarget | None:
         self.calls.append(("target", rule_id))
-        return LogTarget(token="t", group_id=GROUP, thread_id=THREAD) if self.enabled else None
+        if not self.enabled:
+            return None
+        return LogTarget(
+            token="t",
+            group_id=GROUP,
+            thread_id=THREAD,
+            all_matches=self.all_matches,
+            stream_thread_id=self.stream_thread_id,
+        )
 
     async def send_log_card(
         self, target: LogTarget, text: str, *, reply_to: int | None = None
@@ -486,6 +751,7 @@ class FakeNotifier:
         if self.gate is not None:
             await self.gate.wait()
         self.calls.append(("send", text, reply_to))
+        self.threads.append(target.thread_id)
         if self.fail_send:
             raise self.fail_send.pop(0)
         self._next_id += 1
@@ -504,12 +770,18 @@ class FakeNotifier:
 
 
 class FakeDatabase:
+    def __init__(self) -> None:
+        self.executed: list[Any] = []
+
     @contextlib.asynccontextmanager
     async def session(self) -> AsyncIterator[Any]:
         yield self
 
     async def get(self, _model: Any, _ident: Any) -> Any:
         return SimpleNamespace(label="Продажи-1", username=None)
+
+    async def execute(self, statement: Any) -> None:
+        self.executed.append(statement)
 
 
 _REPORTERS: list[MatchLogReporter] = []
@@ -528,11 +800,11 @@ async def _stop_reporters() -> AsyncIterator[None]:
 
 
 def make_reporter(
-    notifier: FakeNotifier, *, queue_limit: int = 200
+    notifier: FakeNotifier, *, queue_limit: int = 200, database: FakeDatabase | None = None
 ) -> tuple[MatchLogReporter, FakeClock]:
     clock = FakeClock()
     reporter = MatchLogReporter(
-        FakeDatabase(),  # type: ignore[arg-type]
+        database or FakeDatabase(),  # type: ignore[arg-type]
         notifier,  # type: ignore[arg-type]
         tz_offset_hours=3,
         queue_limit=queue_limit,
@@ -544,7 +816,7 @@ def make_reporter(
 
 async def idle(reporter: MatchLogReporter) -> None:
     """Ждёт, пока фоновая задача разберёт очередь и уснёт."""
-    for _ in range(500):
+    for _ in range(2000):
         await asyncio.sleep(0)
         if not reporter.pending and not reporter._wakeup.is_set():
             return
@@ -555,6 +827,10 @@ def open_card(reporter: MatchLogReporter, text: str = "нужен дизайне
     card = reporter.open_card(make_message(text), make_match())
     assert card is not None
     return card
+
+
+def rate_limited(seconds: float = 3) -> NotifyRateLimitError:
+    return NotifyRateLimitError("Too Many Requests", retry_after=seconds)
 
 
 SENT = outcome(ActionType.REPLY, ActionStatus.SENT, reply_text="Здравствуйте!")
@@ -604,7 +880,7 @@ class TestReporter:
 
         card.report(SCHEDULED)
         await idle(reporter)
-        assert "⏳ Ответ запланирован через 30 с" in notifier.of("edit")[-1][2]
+        assert "⏳ Ответ запланирован через 30 с (≈ в " in notifier.of("edit")[-1][2]
 
         card.report(SENT)
         await idle(reporter)
@@ -646,9 +922,18 @@ class TestReporter:
         assert notifier.of("send")[0][1].endswith(PENDING_LINE)
         assert "✅ Ответ отправлен" in notifier.of("edit")[0][2]
 
+    async def test_other_matched_rules_are_on_the_card(self) -> None:
+        notifier = FakeNotifier()
+        reporter, _ = make_reporter(notifier)
+        card = reporter.open_card(make_message(), make_match(), also_matched=["Логотипы"])
+        assert card is not None
+        await idle(reporter)
+        assert "➕ Также совпали: Логотипы" in notifier.of("send")[0][1]
+
+    # --- 429 и временные сбои -------------------------------------------------
     async def test_429_waits_retry_after_and_retries_once(self) -> None:
         notifier = FakeNotifier()
-        notifier.fail_send = [NotifyRateLimitError("Too Many Requests", retry_after=7)]
+        notifier.fail_send = [rate_limited(7)]
         reporter, clock = make_reporter(notifier)
 
         card = open_card(reporter)
@@ -660,27 +945,67 @@ class TestReporter:
         assert card.state is CardState.POSTED
         assert reporter.throttled == 1
 
-    async def test_429_twice_is_reported_and_the_result_retried_later(self) -> None:
+    async def test_429_twice_on_a_card_with_its_result_requeues_it(self) -> None:
+        """Итог уже внутри карточки — второй 429 не должен её потерять."""
         notifier = FakeNotifier()
-        notifier.fail_send = [
-            NotifyRateLimitError("Too Many Requests", retry_after=3),
-            NotifyRateLimitError("Too Many Requests", retry_after=3),
-        ]
+        notifier.fail_send = [rate_limited(), rate_limited()]
         reporter, _ = make_reporter(notifier)
 
         card = open_card(reporter)
-        await idle(reporter)
-        assert card.state is CardState.FAILED
-        assert notifier.errors, "ошибка видна в настройках бота"
-        assert reporter.failed == 1
-
-        # Итог пришёл позже — карточка уходит целиком заново, с итогом.
         card.report(SENT)
         await idle(reporter)
+
         sends = notifier.of("send")
-        assert len(sends) == 3
+        assert len(sends) == 3, "две попытки, потом — в конец очереди, и ушла"
         assert "✅ Ответ отправлен" in sends[-1][1]
         assert card.state is CardState.POSTED
+        assert reporter.requeued == 1
+
+    async def test_429_twice_on_an_edit_requeues_the_final_result(self) -> None:
+        notifier = FakeNotifier()
+        reporter, _ = make_reporter(notifier)
+        card = open_card(reporter)
+        await idle(reporter)
+
+        notifier.fail_edit = [rate_limited(), rate_limited()]
+        card.report(SENT)
+        await idle(reporter)
+
+        assert len(notifier.of("edit")) == 3
+        assert card.shown_result == card.result, "итог всё-таки в карточке"
+        assert not card.edit_broken
+        assert reporter.requeued == 1
+
+    async def test_persistent_429_gives_up_loudly(self) -> None:
+        notifier = FakeNotifier()
+        reporter, _ = make_reporter(notifier)
+        card = open_card(reporter)
+        await idle(reporter)
+
+        notifier.fail_edit = [rate_limited() for _ in range(2 * (MAX_REQUEUES + 1))]
+        card.report(SENT)
+        await idle(reporter)
+
+        assert len(notifier.of("edit")) == 2 * (MAX_REQUEUES + 1), "ограниченное число попыток"
+        assert reporter.requeued == MAX_REQUEUES
+        assert reporter.failed == 1
+        assert notifier.errors, "ошибка видна в настройках бота"
+        assert card.shown_result != card.result
+
+    async def test_network_error_on_edit_is_retried_not_turned_into_replies(self) -> None:
+        notifier = FakeNotifier()
+        reporter, _ = make_reporter(notifier)
+        card = open_card(reporter)
+        await idle(reporter)
+
+        notifier.fail_edit = [httpx.ConnectError("boom"), NotifyTransientError("Bad Gateway")]
+        card.report(SENT)
+        await idle(reporter)
+
+        assert len(notifier.of("edit")) == 3
+        assert len(notifier.of("send")) == 1, "итог не ушёл отдельным ответом"
+        assert not card.edit_broken
+        assert card.shown_result == card.result
 
     async def test_edit_failure_falls_back_to_a_reply_in_the_thread(self) -> None:
         notifier = FakeNotifier()
@@ -694,7 +1019,10 @@ class TestReporter:
 
         assert len(notifier.of("edit")) == 1
         reply = notifier.of("send")[-1]
-        assert reply == ("send", "⏳ Ответ запланирован через 30 с", card.message_id)
+        assert reply[1].startswith("⏳ Ответ запланирован через 30 с")
+        assert reply[2] == card.message_id
+        assert notifier.threads[-1] == THREAD, "ответ — в том же топике"
+        assert card.edit_broken
 
         # Дальше итог сразу ответом, без заведомо неудачной правки.
         card.report(SENT)
@@ -703,7 +1031,43 @@ class TestReporter:
         assert notifier.of("send")[-1][2] == card.message_id
         assert notifier.of("send")[-1][1].startswith("✅ Ответ отправлен")
 
-    async def test_nothing_is_sent_when_turned_off(self) -> None:
+    async def test_other_edit_errors_reply_once_but_keep_trying_edits(self) -> None:
+        notifier = FakeNotifier()
+        reporter, _ = make_reporter(notifier)
+        card = open_card(reporter)
+        await idle(reporter)
+
+        notifier.fail_edit = [NotifyError("Bad Request: can't parse entities")]
+        card.report(SCHEDULED)
+        await idle(reporter)
+        assert notifier.of("send")[-1][2] == card.message_id
+        assert not card.edit_broken
+
+        card.report(SENT)
+        await idle(reporter)
+        assert len(notifier.of("edit")) == 2, "следующий итог — снова правкой"
+
+    async def test_permanent_send_error_waits_for_the_next_result(self) -> None:
+        notifier = FakeNotifier()
+        notifier.fail_send = [NotifyError("Bad Request: chat not found")]
+        reporter, _ = make_reporter(notifier)
+
+        card = open_card(reporter)
+        await idle(reporter)
+        assert card.state is CardState.FAILED
+        assert notifier.errors, "ошибка видна в настройках бота"
+        assert reporter.failed == 1
+
+        # Итог пришёл позже — карточка уходит целиком заново, с итогом.
+        card.report(SENT)
+        await idle(reporter)
+        sends = notifier.of("send")
+        assert len(sends) == 2
+        assert "✅ Ответ отправлен" in sends[-1][1]
+        assert card.state is CardState.POSTED
+
+    # --- выключатели ----------------------------------------------------------
+    async def test_nothing_is_sent_when_notifications_are_off(self) -> None:
         notifier = FakeNotifier()
         notifier.enabled = False
         reporter, _ = make_reporter(notifier)
@@ -716,6 +1080,151 @@ class TestReporter:
         assert card.state is CardState.SKIPPED
         assert notifier.of("send") == [] and notifier.of("edit") == []
 
+    async def test_every_match_mode_off_still_reports_sent_replies(self) -> None:
+        """Как было до режима: карточка об отправленном ответе приходит."""
+        notifier = FakeNotifier()
+        notifier.all_matches = False
+        reporter, _ = make_reporter(notifier)
+
+        card = open_card(reporter)
+        await idle(reporter)
+        assert card.state is CardState.HELD
+        assert notifier.of("send") == [], "совпадение без итога не шлём"
+
+        card.report(SENT)
+        await idle(reporter)
+
+        (send,) = notifier.of("send")
+        assert "✅ Ответ отправлен" in send[1] and "нужен дизайнер" in send[1]
+        assert notifier.of("edit") == []
+        assert card.state is CardState.POSTED
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            IGNORED,
+            outcome(ActionType.REQUEST_REVIEW, ActionStatus.SENT),
+            outcome(ActionType.ESCALATE_TO_HUMAN, ActionStatus.SENT, reason="нужен оператор"),
+        ],
+    )
+    async def test_every_match_mode_off_skips_matches_without_a_reply(
+        self, result: ReplyOutcome
+    ) -> None:
+        notifier = FakeNotifier()
+        notifier.all_matches = False
+        reporter, _ = make_reporter(notifier)
+
+        card = open_card(reporter)
+        await idle(reporter)
+        card.report(result)
+        await idle(reporter)
+
+        assert notifier.of("send") == [] and notifier.of("edit") == []
+        assert card.state is CardState.SKIPPED
+
+    async def test_every_match_mode_off_with_a_delayed_reply(self) -> None:
+        notifier = FakeNotifier()
+        notifier.all_matches = False
+        reporter, _ = make_reporter(notifier)
+
+        card = open_card(reporter)
+        card.report(SCHEDULED)
+        await idle(reporter)
+        assert notifier.of("send") == [], "«⏳» — ещё не ответ"
+
+        card.report(SENT)
+        await idle(reporter)
+        assert len(notifier.of("send")) == 1
+
+    async def test_every_match_mode_off_result_known_before_posting(self) -> None:
+        notifier = FakeNotifier()
+        notifier.all_matches = False
+        reporter, _ = make_reporter(notifier)
+
+        open_card(reporter).report(SENT)
+        open_card(reporter, "второе").report(IGNORED)
+        await idle(reporter)
+
+        (send,) = notifier.of("send")
+        assert "✅ Ответ отправлен" in send[1] and "нужен дизайнер" in send[1]
+
+    # --- общий поток и ревью --------------------------------------------------
+    async def test_rule_topic_reply_is_noted_in_the_common_stream(self) -> None:
+        notifier = FakeNotifier()
+        notifier.stream_thread_id = 11
+        reporter, _ = make_reporter(notifier)
+
+        card = open_card(reporter)
+        await idle(reporter)
+        card.report(SENT)
+        await idle(reporter)
+        card.report(SENT)  # повтор итога — второй строки нет
+        await idle(reporter)
+
+        sends = notifier.of("send")
+        assert len(sends) == 2
+        assert notifier.threads == [THREAD, 11]
+        note = sends[-1][1]
+        assert note.startswith("✅ Ответ отправлен · <b>Поиск клиентов</b> · 👤 Иван")
+        assert f'<a href="https://t.me/c/777/{card.message_id}">карточка</a>' in note
+
+    async def test_failed_dm_is_flagged_in_the_stream_note(self) -> None:
+        notifier = FakeNotifier()
+        notifier.stream_thread_id = 11
+        reporter, _ = make_reporter(notifier)
+
+        open_card(reporter).report(
+            outcome(
+                ActionType.REPLY,
+                ActionStatus.SENT,
+                reply_text="Отправлю в лс",
+                dm_text="Ответ",
+                dm_error="PrivacyRestricted",
+            )
+        )
+        await idle(reporter)
+        assert notifier.of("send")[-1][1].startswith("⚠️ В чат ушло, личка НЕ ушла · ")
+
+    @pytest.mark.parametrize("result", [IGNORED, SCHEDULED])
+    async def test_no_stream_note_without_a_sent_reply(self, result: ReplyOutcome) -> None:
+        notifier = FakeNotifier()
+        notifier.stream_thread_id = 11
+        reporter, _ = make_reporter(notifier)
+
+        open_card(reporter).report(result)
+        await idle(reporter)
+
+        assert notifier.threads == [THREAD]
+
+    async def test_no_stream_note_for_cards_already_in_the_stream(self) -> None:
+        notifier = FakeNotifier()  # stream_thread_id=None: карточка и так в потоке
+        reporter, _ = make_reporter(notifier)
+
+        open_card(reporter).report(SENT)
+        await idle(reporter)
+
+        assert len(notifier.of("send")) == 1
+
+    async def test_review_card_is_linked_for_the_operator_decision(self) -> None:
+        notifier = FakeNotifier()
+        database = FakeDatabase()
+        reporter, _ = make_reporter(notifier, database=database)
+        review_id = uuid.uuid4()
+
+        card = open_card(reporter)
+        await idle(reporter)
+        card.report(outcome(ActionType.REQUEST_REVIEW, ActionStatus.SENT, review_id=review_id))
+        await idle(reporter)
+
+        (statement,) = database.executed
+        assert statement.table.name == PendingReview.__tablename__
+        params = statement.compile().params
+        assert params["match_card_message_id"] == card.message_id
+        assert params["match_card_thread_id"] == THREAD
+        assert review_id in params.values()
+        assert card.review_linked
+
+    # --- очередь --------------------------------------------------------------
     async def test_overflow_drops_the_oldest_cards_and_counts_them(self) -> None:
         notifier = FakeNotifier()
         reporter, _ = make_reporter(notifier, queue_limit=3)
@@ -732,6 +1241,24 @@ class TestReporter:
         assert all(
             f"сообщение {index}" in text for index, text in zip(range(2, 5), texts, strict=True)
         )
+
+    async def test_overflow_drops_stream_notes_before_cards(self) -> None:
+        notifier = FakeNotifier()
+        notifier.gate = asyncio.Event()  # бот висит — всё копится в очереди
+        reporter, _ = make_reporter(notifier, queue_limit=3)
+        first = open_card(reporter)
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert first.state is CardState.POSTING
+
+        reporter._enqueue(_mirror_op(first))
+        open_card(reporter, "m1")
+        open_card(reporter, "m2")
+        open_card(reporter, "m3")  # переполнение
+
+        assert reporter.dropped_notes == 1
+        assert reporter.dropped_cards == 0
+        assert [op.kind for op in reporter._ops] == ["post"] * 3
 
     async def test_overflow_of_updates_drops_the_oldest_update(self) -> None:
         notifier = FakeNotifier()
@@ -779,6 +1306,7 @@ class TestReporter:
 
         assert len(notifier.of("send")) == 2
         assert reporter.open_card(make_message(), make_match()) is None
+        assert reporter.dropped_cards == 1, "карточка после остановки — не молча"
 
     async def test_close_gives_up_after_the_grace_period(self) -> None:
         notifier = FakeNotifier()
@@ -803,9 +1331,15 @@ class TestReporter:
         assert "❓ Итог" in notifier.of("send")[0][1]
 
 
+def _mirror_op(card: MatchCard) -> Any:
+    from app.notifications.match_log import _Op
+
+    return _Op("mirror", card)
+
+
 # --- NotifierBot: Bot API ---------------------------------------------------------
-def make_bot(handler: Any) -> NotifierBot:
-    bot = NotifierBot(build_secret_box(make_settings()))
+def make_bot(handler: Any, **kwargs: Any) -> NotifierBot:
+    bot = NotifierBot(build_secret_box(make_settings()), **kwargs)
     bot._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return bot
 
@@ -813,20 +1347,21 @@ def make_bot(handler: Any) -> NotifierBot:
 TARGET = LogTarget(token="123:abc", group_id=GROUP, thread_id=THREAD)
 
 
+def too_many_requests(_request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        429,
+        json={
+            "ok": False,
+            "error_code": 429,
+            "description": "Too Many Requests: retry after 7",
+            "parameters": {"retry_after": 7},
+        },
+    )
+
+
 class TestNotifierBotLogCards:
     async def test_429_raises_with_retry_after(self) -> None:
-        def handler(_request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                429,
-                json={
-                    "ok": False,
-                    "error_code": 429,
-                    "description": "Too Many Requests: retry after 7",
-                    "parameters": {"retry_after": 7},
-                },
-            )
-
-        bot = make_bot(handler)
+        bot = make_bot(too_many_requests)
         with pytest.raises(NotifyRateLimitError) as error:
             await bot.send_log_card(TARGET, "текст")
         assert error.value.retry_after == 7
@@ -840,7 +1375,21 @@ class TestNotifierBotLogCards:
         bot = make_bot(handler)
         with pytest.raises(NotifyError) as error:
             await bot.send_log_card(TARGET, "текст")
-        assert not isinstance(error.value, NotifyRateLimitError)
+        assert not isinstance(error.value, NotifyRateLimitError | NotifyTransientError)
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            httpx.Response(502, text="<html>Bad Gateway</html>"),
+            httpx.Response(
+                500, json={"ok": False, "error_code": 500, "description": "Internal Server Error"}
+            ),
+        ],
+    )
+    async def test_server_errors_are_transient(self, response: httpx.Response) -> None:
+        bot = make_bot(lambda _request: response)
+        with pytest.raises(NotifyTransientError):
+            await bot.send_log_card(TARGET, "текст")
 
     async def test_send_goes_to_the_thread_and_can_reply(self) -> None:
         seen: list[dict[str, Any]] = []
@@ -857,6 +1406,7 @@ class TestNotifierBotLogCards:
         assert seen[0]["message_thread_id"] == THREAD
         assert seen[0]["parse_mode"] == "HTML"
         assert "reply_to_message_id" not in seen[0]
+        assert "counted" not in seen[0], "служебный флаг не уходит в Bot API"
         assert seen[1]["reply_to_message_id"] == 9
         assert seen[1]["allow_sending_without_reply"] is True
 
@@ -872,6 +1422,100 @@ class TestNotifierBotLogCards:
             )
 
         await make_bot(handler).edit_log_card(TARGET, 9, "то же самое")
+
+    async def test_every_group_message_counts_in_the_shared_limit(self) -> None:
+        """Ревью/лиды/дайджест отмечаются в лимите — карточки им уступают."""
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 9}})
+
+        clock = FakeClock()
+        limiter = ChatRateLimiter(
+            max_per_window=2, window_seconds=60, min_interval_seconds=0, clock=clock
+        )
+        bot = make_bot(handler, limiter=limiter)
+        await bot._call("t", "sendMessage", chat_id=GROUP, text="ревью")
+        await bot._call("t", "editMessageReplyMarkup", chat_id=GROUP, message_id=1)
+        await bot._call("t", "getChat", chat_id=GROUP)  # не пишет в чат — не считается
+        assert limiter.delay(GROUP) == 60
+
+        # Карточка совпадения место уже заняла (acquire) — второй раз не считаем.
+        await bot.send_log_card(LogTarget(token="t", group_id=GROUP + 1, thread_id=None), "x")
+        assert limiter.delay(GROUP + 1) == 0
+
+    async def test_429_blocks_the_shared_limit(self) -> None:
+        clock = FakeClock()
+        limiter = ChatRateLimiter(clock=clock, min_interval_seconds=0)
+        bot = make_bot(too_many_requests, limiter=limiter)
+
+        with pytest.raises(NotifyRateLimitError):
+            await bot._call("t", "sendMessage", chat_id=GROUP, text="лид")
+        assert limiter.delay(GROUP) == 7
+
+
+class TestSendReviewRetry:
+    def _review(self) -> Any:
+        return SimpleNamespace(
+            id=uuid.uuid4(),
+            chat_id=None,
+            sender_username=None,
+            sender_display_name="Иван",
+            target_sender_tg_id=4242,
+            confidence=0.5,
+            tg_chat_id=-100_123,
+            reply_to_tg_message_id=7,
+            incoming_text="нужен дизайнер",
+            dm_text=None,
+            reply_text="Здравствуйте!",
+            notify_message_id=None,
+        )
+
+    async def _send(self, responses: list[httpx.Response]) -> tuple[Any, list[float]]:
+        slept: list[float] = []
+
+        async def sleep(seconds: float) -> None:
+            slept.append(seconds)
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return responses.pop(0)
+
+        bot = make_bot(handler, sleep=sleep)
+        bot._load_settings = _async_value(("t", GROUP))  # type: ignore[method-assign]
+        bot._ensure_stream_topic = _async_value(11)  # type: ignore[method-assign]
+        review = self._review()
+        await bot.send_review(FakeSession({}), review)
+        return review, slept
+
+    async def test_retries_once_after_retry_after(self) -> None:
+        review, slept = await self._send(
+            [
+                too_many_requests(httpx.Request("POST", "https://x")),
+                httpx.Response(200, json={"ok": True, "result": {"message_id": 55}}),
+            ]
+        )
+        assert slept == [7.0]
+        assert review.notify_message_id == 55
+
+    async def test_long_retry_after_is_not_waited_inline(self) -> None:
+        long_wait = httpx.Response(
+            429,
+            json={
+                "ok": False,
+                "error_code": 429,
+                "description": "Too Many Requests",
+                "parameters": {"retry_after": 120},
+            },
+        )
+        review, slept = await self._send([long_wait])
+        assert slept == []
+        assert review.notify_message_id is None
+
+
+def _async_value(value: Any) -> Any:
+    async def call(*_args: Any, **_kwargs: Any) -> Any:
+        return value
+
+    return call
 
 
 class FakeSession:
@@ -922,6 +1566,8 @@ class TestLogTarget:
         )
         assert target is not None
         assert (target.group_id, target.thread_id) == (GROUP, 77)
+        assert target.stream_thread_id == 11, "ответы — ещё строкой в общий поток"
+        assert target.all_matches
         assert "123:abc" not in repr(target), "токен не светится в логах"
 
     async def test_other_rules_go_to_the_common_stream(self) -> None:
@@ -931,15 +1577,27 @@ class TestLogTarget:
         )
         assert target is not None
         assert target.thread_id == 11
+        assert target.stream_thread_id is None, "карточка и так в общем потоке"
 
-    @pytest.mark.parametrize(
-        "fields", [{"log_all_matches": False}, {"enabled": False}, {"group_id": None}]
-    )
+    async def test_every_match_mode_off_keeps_the_target(self) -> None:
+        target = await self._bot().log_target(
+            self._session(self._settings_row(log_all_matches=False)), rule_id=RULE_ID
+        )
+        assert target is not None, "об отправленных ответах карточки идут и так"
+        assert target.all_matches is False
+
+    @pytest.mark.parametrize("fields", [{"enabled": False}, {"group_id": None}])
     async def test_turned_off(self, fields: dict[str, Any]) -> None:
         target = await self._bot().log_target(
             self._session(self._settings_row(**fields)), rule_id=RULE_ID
         )
         assert target is None
+
+    @pytest.mark.parametrize(("value", "expected"), [(True, True), (False, False)])
+    async def test_every_match_flag_for_save_lead(self, value: bool, expected: bool) -> None:
+        session = self._session(self._settings_row(log_all_matches=value))
+        assert await self._bot().log_all_matches_enabled(session) is expected
+        assert await self._bot().log_all_matches_enabled(FakeSession({})) is True
 
 
 # --- настройка: колонка, миграция, API ------------------------------------------------
@@ -953,6 +1611,11 @@ class TestLogAllMatchesSetting:
         assert column.server_default is not None, "существующая строка получит «вкл»"
         assert column.default is not None and column.default.arg is True
 
+    def test_review_keeps_a_link_to_the_match_card(self) -> None:
+        columns = PendingReview.__table__.c
+        assert columns["match_card_message_id"].nullable
+        assert columns["match_card_thread_id"].nullable
+
     def test_migration_chains_on_xx22_without_forking_heads(self) -> None:
         config = Config()
         config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
@@ -965,6 +1628,8 @@ class TestLogAllMatchesSetting:
         source = Path(revision.path).read_text(encoding="utf-8")
         assert "server_default=sa.true()" in source
         assert 'drop_column("notify_settings", "log_all_matches")' in source
+        assert '"pending_reviews", sa.Column("match_card_message_id"' in source
+        assert 'drop_column("pending_reviews", "match_card_thread_id")' in source
 
     def test_api_exposes_and_accepts_the_flag(self) -> None:
         row = NotifySettings(id=SINGLETON_ID, enabled=True)

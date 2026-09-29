@@ -21,10 +21,12 @@ import pytest
 
 from app.actions import handlers
 from app.actions.engine import ActionEngine, ActionRequest, ActionResult
-from app.actions.handlers import ReplyHandler
+from app.actions.handlers import ReplyHandler, ReviewHandler, SaveLeadHandler
 from app.core.errors import TelegramError
 from app.models import ActionStatus, ActionType, ChatType, ProcessedStatus
 from app.notifications.match_log import (
+    INTERRUPTED_BEFORE_REPLY_LINE,
+    INTERRUPTED_LINE,
     NO_REPLY_PIPELINE_LINE,
     STOPLIST_LINE,
     crash_line,
@@ -34,10 +36,12 @@ from app.notifications.notifier import NotifierBot
 from app.pipeline import monitor_pipeline
 from app.pipeline.monitor_pipeline import MonitorPipeline
 from app.pipeline.reply_pipeline import ReplyOutcome
+from app.rules.engine import RuleMatch
 from app.rules.filters import SelfGuard, StopGuard
 from app.telegram.messages import NormalizedMessage
 from app.telegram.peers import PeerCache
 from app.telegram.sender import SentMessage
+from app.workers.worker import Worker
 from tests.conftest import make_settings
 from tests.unit.test_scenario_reply_delay import (
     CHAT_ID,
@@ -99,7 +103,24 @@ class TestReplyPipelineReportsToTheCard:
         assert sent.outcome.reply_text == "Отправлю в лс"
         assert sent.outcome.dm_text == REPLY_TEXT
         assert sent.outcome.dm_error == "PrivacyRestricted"
-        assert "⚠️ Личка не ушла: PrivacyRestricted" in outcome_line(sent.outcome)
+        assert outcome_line(sent.outcome).startswith(
+            "⚠️ В чат ушло, личка НЕ ушла: PrivacyRestricted"
+        )
+
+    async def test_send_failure_without_a_detail_is_still_human_readable(self) -> None:
+        class SilentFailure(FakeActions):
+            async def dispatch(self, request: ActionRequest) -> ActionResult:
+                result = await super().dispatch(request)
+                if request.type is ActionType.REPLY:
+                    return dataclasses.replace(result, detail=None)
+                return result
+
+        env = make_env(actions=SilentFailure(reply_status=ActionStatus.FAILED))
+
+        sent = await send(env, make_scenario())
+
+        assert sent.outcome.send_error == "неизвестная ошибка отправки"
+        assert "FAILED" not in outcome_line(sent.outcome)
 
     async def test_immediate_send_failure_is_a_send_error(self) -> None:
         env = make_env(actions=FakeActions(reply_status=ActionStatus.FAILED))
@@ -118,7 +139,7 @@ class TestReplyPipelineReportsToTheCard:
 
         assert sent.outcome.scheduled
         assert sent.outcome.delay_seconds == 30
-        assert outcome_line(sent.outcome) == "⏳ Ответ запланирован через 30 с"
+        assert outcome_line(sent.outcome).startswith("⏳ Ответ запланирован через 30 с (≈ в ")
         assert card.outcomes == [], "«⏳» дописывает вызывающий, итог — задача"
 
         env.sleep.release.set()
@@ -186,6 +207,59 @@ class TestReplyPipelineReportsToTheCard:
         assert final.send_error is None, "ответа не было — это не сбой отправки"
         assert "остановка воркера" in outcome_line(final)
 
+    async def test_shutdown_in_the_middle_of_the_send_is_unknown(self) -> None:
+        entered = asyncio.Event()
+
+        async def hang(_request: ActionRequest) -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+        env = make_env(actions=FakeActions(on_reply=hang))
+        card = FakeCard()
+        await send(env, delayed(1), card=card)
+        env.sleep.release.set()
+        await asyncio.wait_for(entered.wait(), timeout=WAIT)
+
+        await env.pipeline.shutdown(grace_seconds=WAIT)
+
+        (final,) = card.outcomes
+        assert final.send_unknown
+        line = outcome_line(final)
+        assert line.startswith("⚠️ Неизвестно, ушёл ли ответ: отложенный ответ прерван")
+        assert "❌" not in line
+
+    async def test_failed_status_write_does_not_overwrite_the_result(self) -> None:
+        env = make_env()
+        card = FakeCard()
+        await send(env, delayed(600), card=card)
+        await asyncio.wait_for(env.sleep.started.wait(), timeout=WAIT)
+
+        async def status_down(*_args: Any) -> None:
+            raise RuntimeError("db is down")
+
+        env.pipeline._set_message_status = status_down  # type: ignore[method-assign]
+        await env.pipeline.shutdown(grace_seconds=WAIT)
+
+        (final,) = card.outcomes
+        assert final.action is ActionType.ESCALATE_TO_HUMAN
+        assert card.lines == [], "эскалация прошла — «передать не удалось» было бы враньём"
+
+    async def test_cancel_during_cleanup_still_leaves_a_result(self) -> None:
+        async def cancelled(_request: ActionRequest) -> None:
+            raise asyncio.CancelledError
+
+        env = make_env(actions=FakeActions(on_escalate=cancelled))
+        card = FakeCard()
+        await send(env, delayed(600), card=card)
+        await asyncio.wait_for(env.sleep.started.wait(), timeout=WAIT)
+
+        await env.pipeline.shutdown(grace_seconds=WAIT)
+
+        assert card.outcomes == []
+        (line,) = card.lines
+        assert line.startswith("⏭ Не отправляли: отложенный ответ отменён")
+        assert "передать оператору не удалось" in line
+
     async def test_failed_cleanup_still_leaves_a_result(self) -> None:
         async def escalation_down(_request: ActionRequest) -> None:
             raise RuntimeError("db is down")
@@ -207,15 +281,19 @@ class TestReplyPipelineReportsToTheCard:
 class FakeReporter:
     def __init__(self) -> None:
         self.cards: list[tuple[NormalizedMessage, Any, FakeCard]] = []
+        self.also: list[list[str]] = []
 
-    def open_card(self, message: NormalizedMessage, match: Any) -> FakeCard:
+    def open_card(
+        self, message: NormalizedMessage, match: Any, *, also_matched: Any = ()
+    ) -> FakeCard:
         card = FakeCard()
         self.cards.append((message, match, card))
+        self.also.append(list(also_matched))
         return card
 
 
 class FakeReply:
-    def __init__(self, outcome: ReplyOutcome | Exception, reporter: FakeReporter) -> None:
+    def __init__(self, outcome: ReplyOutcome | BaseException, reporter: FakeReporter) -> None:
         self._outcome = outcome
         self._reporter = reporter
         self.calls: list[Any] = []
@@ -232,7 +310,7 @@ class FakeReply:
     ) -> ReplyOutcome:
         self.calls.append(card)
         self.cards_open_at_call.append(len(self._reporter.cards))
-        if isinstance(self._outcome, Exception):
+        if isinstance(self._outcome, BaseException):
             raise self._outcome
         return self._outcome
 
@@ -261,7 +339,7 @@ class NullPublisher:
 @dataclasses.dataclass
 class Store:
     monitored: bool = True
-    status_error: Exception | None = None
+    status_error: BaseException | None = None
     claimed: set[tuple[Any, ...]] = dataclasses.field(default_factory=set)
     statuses: list[tuple[ProcessedStatus, str | None]] = dataclasses.field(default_factory=list)
 
@@ -334,7 +412,7 @@ IGNORED = ReplyOutcome(action=ActionType.IGNORE, status=ActionStatus.SENT, reaso
 def make_monitor(
     *,
     matches: list[Any] | None = None,
-    outcome: ReplyOutcome | Exception = IGNORED,
+    outcome: ReplyOutcome | BaseException = IGNORED,
     with_reply: bool = True,
     with_log: bool = True,
     stop_guard: StopGuard | None = None,
@@ -405,6 +483,36 @@ class TestMonitorPipelineCards:
             await pipeline._process(incoming())
 
         assert reporter.cards[0][2].lines == [crash_line(error)]
+
+    async def test_shutdown_during_the_reply_is_reported_and_re_raised(self, store: Store) -> None:
+        """Отмена — BaseException: мимо except Exception карточка висела бы «⌛»."""
+        pipeline, reporter, _, _ = make_monitor(outcome=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError):
+            await pipeline._process(incoming())
+
+        assert reporter.cards[0][2].lines == [INTERRUPTED_LINE]
+
+    async def test_shutdown_before_the_reply_is_reported(self, store: Store) -> None:
+        store.status_error = asyncio.CancelledError()
+        pipeline, reporter, reply, _ = make_monitor()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pipeline._process(incoming())
+
+        assert reply.calls == []
+        assert reporter.cards[0][2].lines == [INTERRUPTED_BEFORE_REPLY_LINE]
+
+    async def test_other_matched_rules_go_on_the_card(self, store: Store) -> None:
+        first, third = make_match(), make_match()
+        second = RuleMatch(rule=dataclasses.replace(make_match().rule, name="Логотипы"))
+        pipeline, reporter, _, _ = make_monitor(matches=[first, second, third])
+
+        await pipeline._process(incoming())
+
+        assert len(reporter.cards) == 1
+        assert reporter.cards[0][1] is first
+        assert reporter.also == [["Логотипы", "Поиск клиентов"]]
 
     async def test_database_failure_before_the_reply_is_reported(self, store: Store) -> None:
         store.status_error = ConnectionError("db is down")
@@ -501,6 +609,11 @@ class RecordingDatabase:
     async def get(self, _model: Any, _ident: Any) -> Any:
         return None
 
+    async def flush(self) -> None:
+        for row in self.added:
+            if getattr(row, "id", None) is None:
+                row.id = uuid.uuid4()
+
 
 @pytest.fixture
 def lead_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
@@ -581,6 +694,8 @@ class TestReplyHandlerNoDuplicateCard:
 
         assert result.status is ActionStatus.SENT
         assert result.dm_error is None
+        # Лид после ответа — в карточку совпадения (раньше был в карточке лида).
+        assert (result.lead_score, result.lead_status) == (82, "HOT")
         assert sender.sent == [(-100_500, "Здравствуйте!")]
         # Лид заводится как раньше: балл из payload, тот же собеседник.
         (lead,) = lead_calls
@@ -602,10 +717,84 @@ class TestReplyHandlerNoDuplicateCard:
         assert len(lead_calls) == 1
 
 
+class FakeLeadNotifier:
+    def __init__(self, *, every_match: bool) -> None:
+        self.every_match = every_match
+        self.lead_cards: list[dict[str, Any]] = []
+
+    async def log_all_matches_enabled(self, _db: Any) -> bool:
+        return self.every_match
+
+    async def notify_lead(self, _db: Any, **kwargs: Any) -> None:
+        self.lead_cards.append(kwargs)
+
+
+class TestLeadAndReviewHandlers:
+    @pytest.mark.parametrize(("every_match", "lead_cards"), [(True, 0), (False, 1)])
+    async def test_save_lead_card_only_without_the_every_match_mode(
+        self, lead_calls: list[dict[str, Any]], every_match: bool, lead_cards: int
+    ) -> None:
+        """При карточке на каждое совпадение отдельная карточка лида — дубль."""
+        notifier = FakeLeadNotifier(every_match=every_match)
+        handler = SaveLeadHandler(
+            RecordingDatabase(),  # type: ignore[arg-type]
+            NullPublisher(),  # type: ignore[arg-type]
+            notifier=notifier,  # type: ignore[arg-type]
+        )
+
+        result = await handler.execute(reply_request(score=55), uuid.uuid4())
+
+        assert result.status is ActionStatus.SENT
+        assert (result.lead_score, result.lead_status) == (55, "HOT")
+        assert len(lead_calls) == 1, "лид сохраняется в обоих режимах"
+        assert len(notifier.lead_cards) == lead_cards
+
+    async def test_review_handler_returns_the_review_id(
+        self, lead_calls: list[dict[str, Any]]
+    ) -> None:
+        database = RecordingDatabase()
+        handler = ReviewHandler(database, NullPublisher())  # type: ignore[arg-type]
+
+        result = await handler.execute(reply_request(confidence=0.5), uuid.uuid4())
+
+        (review,) = database.added
+        assert result.review_id is not None and result.review_id == review.id
+
+
+class NoteNotifier:
+    def __init__(self) -> None:
+        self.notes: list[tuple[Any, ...]] = []
+
+    async def note_on_card(
+        self, token: str, group_id: int, thread_id: int | None, message_id: int, text: str
+    ) -> None:
+        self.notes.append((token, group_id, thread_id, message_id, text))
+
+
+async def test_operator_decision_is_noted_on_the_match_card() -> None:
+    notifier = NoteNotifier()
+    worker = SimpleNamespace(_notifier=notifier)
+    linked = SimpleNamespace(match_card_message_id=101, match_card_thread_id=77)
+    unlinked = SimpleNamespace(match_card_message_id=None, match_card_thread_id=None)
+
+    await Worker._note_match_card(worker, "t", -100_1, linked, "✅ Ответ отправлен оператором")  # type: ignore[arg-type]
+    await Worker._note_match_card(worker, "t", -100_1, unlinked, "✖️ Оператор отклонил")  # type: ignore[arg-type]
+
+    assert notifier.notes == [("t", -100_1, 77, 101, "✅ Ответ отправлен оператором")]
+
+
 async def test_action_engine_passes_the_dm_error_through() -> None:
+    review_id = uuid.uuid4()
+
     class Handler:
         async def execute(self, _request: ActionRequest, _action_id: uuid.UUID) -> ActionResult:
-            return ActionResult(status=ActionStatus.SENT, dm_error="PrivacyRestricted")
+            return ActionResult(
+                status=ActionStatus.SENT,
+                dm_error="PrivacyRestricted",
+                lead_score=87,
+                lead_status="HOT",
+                review_id=review_id,
+            )
 
     engine = ActionEngine(None)  # type: ignore[arg-type]
     engine.register(ActionType.REPLY, Handler())
@@ -622,3 +811,4 @@ async def test_action_engine_passes_the_dm_error_through() -> None:
     result = await engine.dispatch(reply_request())
 
     assert result.dm_error == "PrivacyRestricted"
+    assert (result.lead_score, result.lead_status, result.review_id) == (87, "HOT", review_id)

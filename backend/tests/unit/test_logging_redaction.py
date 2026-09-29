@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
-import pytest
+import logging
 
-from app.core.logging import REDACTED, mask_phone, redact_processor
+import pytest
+import structlog
+
+from app.core.logging import (
+    REDACTED,
+    SecretScrubFilter,
+    configure_logging,
+    mask_phone,
+    redact_processor,
+)
+from tests.conftest import make_settings
+
+BOT_URL = "https://api.telegram.org/bot123456789:AAH-secret_Token/sendMessage"
 
 
 def process(**fields: object) -> dict[str, object]:
@@ -70,6 +82,45 @@ class TestFreeText:
     def test_long_values_are_truncated(self) -> None:
         result = process(text="x" * 10_000)
         assert len(str(result["text"])) < 5_000
+
+
+class TestBotToken:
+    def test_bot_token_in_free_text_is_scrubbed(self) -> None:
+        result = process(event=f"POST {BOT_URL} failed")
+        assert "AAH-secret_Token" not in str(result["event"])
+        assert f"/bot{REDACTED}/sendMessage" in str(result["event"])
+
+    def test_stdlib_records_are_scrubbed(self) -> None:
+        """httpx пишет URL Bot API (с токеном) через stdlib logging, мимо structlog."""
+        record = logging.LogRecord(
+            "httpx",
+            logging.INFO,
+            __file__,
+            1,
+            'HTTP Request: %s %s "%s"',
+            ("POST", BOT_URL, "200 OK"),
+            None,
+        )
+        assert SecretScrubFilter().filter(record)
+        assert "AAH-secret_Token" not in record.getMessage()
+        assert f"/bot{REDACTED}/sendMessage" in record.getMessage()
+
+    def test_http_client_request_lines_are_quiet_at_info(self) -> None:
+        root = logging.getLogger()
+        handlers, level = list(root.handlers), root.level
+        try:
+            configure_logging(make_settings(log_level="INFO"))
+            assert logging.getLogger("httpx").getEffectiveLevel() == logging.WARNING
+            assert logging.getLogger("httpcore").getEffectiveLevel() == logging.WARNING
+            assert any(
+                isinstance(item, SecretScrubFilter)
+                for handler in root.handlers
+                for item in handler.filters
+            )
+        finally:
+            root.handlers[:] = handlers
+            root.setLevel(level)
+            structlog.reset_defaults()
 
 
 class TestMaskPhone:

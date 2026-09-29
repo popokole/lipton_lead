@@ -17,6 +17,7 @@ Telethon может доставить одно и то же событие дв
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -33,6 +34,8 @@ from app.database.repositories.messages import MessageRepository
 from app.database.session import Database
 from app.models import EventType, ProcessedStatus, RuleScope
 from app.notifications.match_log import (
+    INTERRUPTED_BEFORE_REPLY_LINE,
+    INTERRUPTED_LINE,
     NO_REPLY_PIPELINE_LINE,
     STOPLIST_LINE,
     MatchCard,
@@ -141,7 +144,9 @@ class MonitorPipeline:
             return
         if not matches:
             return
-        card = self._match_log.open_card(message, matches[0])
+        card = self._match_log.open_card(
+            message, matches[0], also_matched=[match.rule.name for match in matches[1:]]
+        )
         if card is not None:
             card.report_line(STOPLIST_LINE)
 
@@ -269,7 +274,9 @@ class MonitorPipeline:
         # числе от реконсайлера. open_card только ставит задание в очередь.
         card: MatchCard | None = None
         if primary is not None and self._match_log is not None:
-            card = self._match_log.open_card(message, primary)
+            card = self._match_log.open_card(
+                message, primary, also_matched=[match.rule.name for match in matches[1:]]
+            )
 
         try:
             async with self._database.session() as db:
@@ -290,6 +297,11 @@ class MonitorPipeline:
                             "also_matched": [match.rule.name for match in matches[1:]],
                         },
                     )
+        except asyncio.CancelledError:
+            # Остановка воркера (отмена задачи — BaseException, мимо except
+            # Exception): до ответа не дошло, карточка не должна висеть «⌛».
+            _report_line(card, INTERRUPTED_BEFORE_REPLY_LINE)
+            raise
         except Exception as exc:
             # До ответа дело не дошло — карточка не должна висеть «в работе».
             _report_crash(card, exc)
@@ -309,6 +321,10 @@ class MonitorPipeline:
                 reply_outcome = await self._reply.handle(
                     message, primary, chat_id=chat_id, message_id=message_id, card=card
                 )
+            except asyncio.CancelledError:
+                # Отменили посреди обработки ответа: отправка могла уже уйти.
+                _report_line(card, INTERRUPTED_LINE)
+                raise
             except Exception as exc:
                 _report_crash(card, exc)
                 raise
@@ -340,5 +356,9 @@ class MonitorPipeline:
 
 def _report_crash(card: MatchCard | None, exc: BaseException) -> None:
     """Обработка упала до итога: в карточку — причина, ответа не было."""
+    _report_line(card, crash_line(exc))
+
+
+def _report_line(card: MatchCard | None, line: str) -> None:
     if card is not None:
-        card.report_line(crash_line(exc))
+        card.report_line(line)
