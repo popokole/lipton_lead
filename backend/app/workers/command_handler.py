@@ -24,8 +24,10 @@ from app.telegram.channel_posts import (
     normalize_chat_reference,
     parse_delete_payload,
     parse_edit_payload,
+    parse_media_payload,
     parse_read_payload,
     read_posts,
+    replace_photo,
     resolve_chat_entity,
 )
 from app.telegram.client_manager import ClientManager
@@ -87,6 +89,7 @@ class CommandHandler:
             CommandType.CHAT_PHOTO: self._chat_photo,
             CommandType.READ_CHANNEL_POSTS: self._read_channel_posts,
             CommandType.EDIT_MESSAGE: self._edit_message,
+            CommandType.EDIT_MEDIA: self._edit_media,
             CommandType.DELETE_MESSAGES: self._delete_messages,
         }
         handler = handlers.get(command.type)
@@ -245,6 +248,11 @@ class CommandHandler:
         request = parse_edit_payload(command.payload)
         client = self._require_client(command.account_id)
         return await edit_post(client, request)
+
+    async def _edit_media(self, command: Command) -> dict[str, Any]:
+        request = parse_media_payload(command.payload)
+        client = self._require_client(command.account_id)
+        return await replace_photo(client, request)
 
     async def _delete_messages(self, command: Command) -> dict[str, Any]:
         request = parse_delete_payload(command.payload)

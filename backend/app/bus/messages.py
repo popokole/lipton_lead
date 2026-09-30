@@ -31,9 +31,11 @@ class CommandType(StrEnum):
     SEND_MESSAGE = "SEND_MESSAGE"
     ACCOUNT_INFO = "ACCOUNT_INFO"
     CHAT_PHOTO = "CHAT_PHOTO"
-    # Посты канала от имени аккаунта: чтение (и бэкап), правка текста, удаление.
+    # Посты канала от имени аккаунта: чтение (и бэкап), правка текста, замена
+    # фото, удаление.
     READ_CHANNEL_POSTS = "READ_CHANNEL_POSTS"
     EDIT_MESSAGE = "EDIT_MESSAGE"
+    EDIT_MEDIA = "EDIT_MEDIA"
     DELETE_MESSAGES = "DELETE_MESSAGES"
 
 

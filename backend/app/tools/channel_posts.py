@@ -1,5 +1,5 @@
-"""CLI: прочитать посты канала, заменить их тексты или удалить лишние — от имени
-нашего аккаунта.
+"""CLI: прочитать посты канала, заменить их тексты или фото, удалить лишние — от
+имени нашего аккаунта.
 
 Запуск — внутри контейнера api (там настройки, Redis и база):
 
@@ -14,6 +14,10 @@
     # применить
     python -m app.tools.channel_posts edit --account "Основной" --chat @my_channel \\
         --plan /tmp/plan.json --apply
+
+    # заменить фото в постах (подпись остаётся как есть)
+    python -m app.tools.channel_posts media --account "Основной" --chat @my_channel \\
+        --plan /tmp/media.json --apply
 
     # удалить посты: сначала проверка, потом --apply с числом постов из проверки
     python -m app.tools.channel_posts delete --account "Основной" --chat @my_channel \\
@@ -50,12 +54,18 @@ EDIT_MESSAGE уходят воркеру через шину — так же, к
 проверка (не совпало — ничего не удаляется); перед удалением пишется бэкап
 текстов (channel_delete_backup_<время>.json; медиа по нему не вернуть).
 Файл --ids — JSON-список id или текст вида «12 15 20-40».
+
+План замены фото — JSON-список {"id": <id поста>, "file": "<путь к PNG/JPEG>"};
+относительный путь считается от папки плана. Менять можно только фото на
+фото; подпись воркер отправляет обратно без изменений. Старые картинки CLI не
+сохраняет.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import difflib
 import json
 import re
@@ -80,9 +90,11 @@ from app.core.logging import configure_logging
 from app.core.runtime import Runtime
 from app.models import Account
 from app.telegram.channel_posts import (
+    MEDIA_MAX_BYTES,
     READ_LIMIT_MAX,
     TEXT_LIMIT,
     entity_signature,
+    image_kind,
     length_limit,
     normalize_chat_reference,
     render_entities,
@@ -125,6 +137,10 @@ DEFAULT_DELETE_BATCH = 50
 DELETE_BATCH_MAX = 100
 DEFAULT_DELETE_PAUSE_SECONDS = 3.0
 MAX_DELETE_IDS = 5000
+# Замена фото: чтение поста и загрузка картинки частями — дольше правки текста.
+MEDIA_EXPIRY_SECONDS = 90.0
+MEDIA_TIMEOUT_SECONDS = 180.0
+DEFAULT_MEDIA_PAUSE_SECONDS = 12.0
 MAX_PAGES = 2000
 _FRAGMENT = 30
 
@@ -1381,6 +1397,233 @@ def _delete_report(
     }
 
 
+# --- media -------------------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class MediaItem:
+    id: int
+    path: Path
+    data: bytes = field(repr=False)
+    kind: str
+
+
+def load_media_plan(path: Path) -> list[MediaItem]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except OSError as exc:
+        raise PlanError(f"Не удалось прочитать {path}: {exc}") from None
+    except json.JSONDecodeError as exc:
+        raise PlanError(f"Некорректный JSON в {path}: {exc}") from None
+    return parse_media_plan(raw, base_dir=path.parent)
+
+
+def parse_media_plan(raw: Any, *, base_dir: Path) -> list[MediaItem]:
+    if not isinstance(raw, list) or not raw:
+        raise PlanError('План — непустой JSON-список {"id": ..., "file": ...}')
+    items: list[MediaItem] = []
+    problems: list[str] = []
+    seen: set[int] = set()
+    for index, entry in enumerate(raw, start=1):
+        where = f"элемент {index}"
+        if not isinstance(entry, dict):
+            problems.append(f"{where}: нужен объект с полями id и file")
+            continue
+        post_id = entry.get("id")
+        if isinstance(post_id, bool) or not isinstance(post_id, int) or post_id <= 0:
+            problems.append(f"{where}: id должен быть положительным числом")
+            continue
+        if post_id in seen:
+            problems.append(f"{where}: пост #{post_id} уже есть в плане")
+            continue
+        seen.add(post_id)
+        file_value = entry.get("file")
+        if not isinstance(file_value, str) or not file_value.strip():
+            problems.append(f"#{post_id}: нет пути к файлу (file)")
+            continue
+        file_path = Path(file_value)
+        if not file_path.is_absolute():
+            file_path = base_dir / file_path
+        try:
+            data = file_path.read_bytes()
+        except OSError as exc:
+            problems.append(f"#{post_id}: не читается {file_path}: {exc.strerror or exc}")
+            continue
+        kind = image_kind(data)
+        if kind is None:
+            problems.append(f"#{post_id}: {file_path.name} — не PNG и не JPEG")
+            continue
+        if len(data) > MEDIA_MAX_BYTES:
+            problems.append(
+                f"#{post_id}: {file_path.name} больше {MEDIA_MAX_BYTES // (1024 * 1024)} МБ"
+            )
+            continue
+        items.append(MediaItem(id=post_id, path=file_path, data=data, kind=kind))
+    if problems:
+        raise PlanError("\n".join(problems))
+    return items
+
+
+@dataclass(frozen=True, slots=True)
+class MediaOptions:
+    apply: bool = False
+    pause_seconds: float = DEFAULT_MEDIA_PAUSE_SECONDS
+    max_flood_wait: int = DEFAULT_MAX_FLOOD_WAIT
+    results_path: Path | None = None
+    backup_dir: Path = field(default_factory=lambda: Path(tempfile.gettempdir()))
+
+
+async def run_media(
+    caller: Caller,
+    *,
+    account_id: uuid.UUID,
+    chat: str,
+    plan: list[MediaItem],
+    options: MediaOptions,
+    echo: Echo = print,
+    sleep: Sleep = asyncio.sleep,
+    now: Clock = utcnow,
+) -> int:
+    """Dry-run по умолчанию; с options.apply — замена фото по одному посту."""
+    current = await read_by_ids(caller, account_id, chat, [item.id for item in plan])
+    target: ChatRef = current["target"]
+    by_id = {int(post["id"]): post for post in current["posts"]}
+
+    mode = "ЗАМЕНА ФОТО (--apply)" if options.apply else "ПРОВЕРКА (dry-run)"
+    echo(f"Чат: {_chat_title(current['chat'], chat)} — {mode}")
+    rows: dict[int, dict[str, Any]] = {}
+    invalid = 0
+    for item in plan:
+        post = by_id.get(item.id)
+        problem = None
+        if post is None:
+            problem = "поста нет в канале"
+        elif post.get("media_type") != "photo":
+            problem = f"у поста не фото ({post.get('media_type') or 'нет медиа'})"
+        status = "error" if problem else "not_attempted"
+        invalid += problem is not None
+        rows[item.id] = {
+            "id": item.id,
+            "file": str(item.path),
+            "bytes": len(item.data),
+            "status": status,
+            **({"problem": problem} if problem else {}),
+        }
+        head = f"{_post_line(post)}  {_snippet(post.get('text') or '')}" if post else f"#{item.id}"
+        tail = f"ОШИБКА: {problem}" if problem else "OK"
+        echo(f"{head.rstrip()}  ← {item.path.name} ({len(item.data) // 1024} КБ)  {tail}")
+    echo(f"Итого: к замене {len(plan) - invalid}, с ошибками {invalid}")
+
+    started = now()
+    results_path = options.results_path or (
+        options.backup_dir / f"channel_media_results_{_stamp(started)}.json"
+    )
+    if not options.apply:
+        echo("Это проверка: в канале ничего не изменено. Чтобы заменить — добавьте --apply.")
+        return EXIT_INVALID if invalid else EXIT_OK
+    if invalid:
+        echo("Есть ошибки — ничего не меняю. Исправьте план и запустите снова.")
+        return EXIT_INVALID
+
+    stopped: dict[str, Any] | None = None
+    done = 0
+    try:
+        for item in plan:
+            if done:
+                await sleep(options.pause_seconds)
+            rows[item.id] = {**rows[item.id], "status": "in_flight"}
+            row = await _replace_one(
+                caller, account_id, target, item, rows[item.id], options, echo, sleep, now
+            )
+            done += 1
+            rows[item.id] = row
+            echo(f"[{done}/{len(plan)}] #{item.id}: {_media_label(row)}")
+            if row["status"] in _STOP_STATUSES:
+                stopped = row
+                break
+    finally:
+        ordered = [rows[item.id] for item in plan]
+        write_json(
+            results_path,
+            {
+                **_report(account_id, chat, current["chat"], started, now(), True, None, ordered),
+                "kind": "channel_media_results",
+            },
+        )
+        summary = _count_statuses(ordered)
+        echo("Результат: " + ", ".join(f"{key} {value}" for key, value in sorted(summary.items())))
+        echo(f"Результаты: {results_path}")
+
+    if stopped is None:
+        return EXIT_OK
+    echo(
+        f"Остановлено на посте #{stopped['id']}: {stopped.get('error_code')}: "
+        f"{stopped.get('error_message')}. Следующие посты не тронуты; "
+        "повторный запуск того же плана безопасен."
+    )
+    return EXIT_FAILED
+
+
+async def _replace_one(
+    caller: Caller,
+    account_id: uuid.UUID,
+    target: ChatRef,
+    item: MediaItem,
+    row: dict[str, Any],
+    options: MediaOptions,
+    echo: Echo,
+    sleep: Sleep,
+    now: Clock,
+) -> dict[str, Any]:
+    waited = 0
+    encoded = base64.b64encode(item.data).decode("ascii")
+    for attempt in (1, 2):
+        payload = {
+            "chat": target,
+            "message_id": item.id,
+            "image_b64": encoded,
+            "expires_at": now().timestamp() + MEDIA_EXPIRY_SECONDS,
+        }
+        command = Command(type=CommandType.EDIT_MEDIA, account_id=account_id, payload=payload)
+        try:
+            result = await caller(command, MEDIA_TIMEOUT_SECONDS)
+        except CommandTimeoutError:
+            return {
+                **row,
+                "status": "unknown",
+                "error_code": "media_unconfirmed",
+                "error_message": f"воркер не ответил за {MEDIA_TIMEOUT_SECONDS:.0f} с — "
+                "проверьте пост; повторный запуск плана безопасен",
+                "flood_waited": waited,
+            }
+        except AppError as exc:
+            return _failed(row, exc.code, exc.message, waited)
+        if result.ok:
+            waited += int(result.data.get("flood_waited") or 0)
+            status = "no_change" if result.data.get("no_change") else "replaced"
+            return {**row, "status": status, "flood_waited": waited}
+        seconds = _flood_seconds(result.error_code, result.data, result.error_message)
+        if attempt == 1 and seconds is not None and seconds <= options.max_flood_wait:
+            echo(f"    #{item.id}: Telegram просит подождать {seconds} с — жду и повторяю")
+            waited += seconds
+            await sleep(seconds + 1)
+            continue
+        failed = _failed(row, result.error_code or "unknown", result.error_message or "", waited)
+        if seconds is not None:
+            failed["retry_after"] = seconds
+        return failed
+    return _failed(row, "retries_exhausted", "Повторы исчерпаны", waited)  # pragma: no cover
+
+
+def _media_label(row: dict[str, Any]) -> str:
+    status = row["status"]
+    if status == "replaced":
+        return "фото заменено"
+    if status == "no_change":
+        return "уже было таким"
+    if status == "unknown":
+        return "НЕИЗВЕСТНО (воркер не ответил)"
+    return f"ОШИБКА {row.get('error_code')}"
+
+
 # --- аккаунт -----------------------------------------------------------------
 _PHONE_RE = re.compile(r"^\+?[\d\s()-]{7,}$")
 
@@ -1550,6 +1793,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     edit.add_argument("--results", type=Path, default=None, help="куда записать результаты JSON")
 
+    media = commands.add_parser(
+        "media", parents=[common], help="заменить фото в постах (подпись не меняется)"
+    )
+    media.add_argument("--plan", type=Path, required=True, help='JSON-список {"id", "file"}')
+    media.add_argument(
+        "--apply", action="store_true", help="заменить (без флага — только проверка)"
+    )
+    media.add_argument(
+        "--pause",
+        type=_non_negative_float,
+        default=DEFAULT_MEDIA_PAUSE_SECONDS,
+        help="пауза между заменами, с",
+    )
+    media.add_argument(
+        "--backup-dir",
+        type=Path,
+        default=Path(tempfile.gettempdir()),
+        help="каталог для файла результатов",
+    )
+    media.add_argument("--results", type=Path, default=None, help="куда записать результаты JSON")
+
     delete = commands.add_parser(
         "delete", parents=[common], help="удалить посты у всех (необратимо)"
     )
@@ -1592,10 +1856,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 async def _run(args: argparse.Namespace) -> int:
     plan: list[PlanItem] = []
+    media_plan: list[MediaItem] = []
     delete_ids: list[int] = []
     try:
         if args.command == "edit":
             plan = load_plan(args.plan)
+        if args.command == "media":
+            media_plan = load_media_plan(args.plan)
         if args.command == "delete":
             delete_ids = load_ids(args.ids)
             if args.apply and args.expect is None:
@@ -1644,6 +1911,20 @@ async def _run(args: argparse.Namespace) -> int:
                 page_size=args.page_size,
                 page_pause=args.page_pause,
                 max_flood_wait=args.max_flood_wait,
+            )
+        if args.command == "media":
+            return await run_media(
+                caller,
+                account_id=account_id,
+                chat=args.chat,
+                plan=media_plan,
+                options=MediaOptions(
+                    apply=args.apply,
+                    pause_seconds=args.pause,
+                    max_flood_wait=args.max_flood_wait,
+                    results_path=args.results,
+                    backup_dir=args.backup_dir,
+                ),
             )
         if args.command == "delete":
             return await run_delete(

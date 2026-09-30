@@ -1,4 +1,4 @@
-"""Чтение, правка и удаление постов канала от имени аккаунта (не бота).
+"""Чтение, правка, замена фото и удаление постов канала от имени аккаунта (не бота).
 
 Задача владельца: в канале, где наш аккаунт — администратор, прочитать все
 посты-шаблоны и потом заменить их тексты. Делает это живой Telethon-клиент
@@ -25,6 +25,8 @@
     на команду пережидаем FloodWait до FLOOD_RETRY_MAX_SECONDS; дольше —
     отдаём вызывающему с числом секунд;
   - MessageNotModified — не ошибка: текст уже такой, какой просили;
+  - замена фото не трогает подпись: воркер отправляет её обратно как есть,
+    с исходными entities, без разбора разметки;
   - удаление повторяемо: воркер смотрит, какие посты есть, удаляет их и
     перечитывает, так что повтор той же команды после таймаута ничего не
     ломает — удалённые придут в already_missing;
@@ -36,11 +38,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import html as html_lib
+import io
 import re
 from collections.abc import Awaitable, Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
 from typing import Any
@@ -65,6 +70,12 @@ DEFAULT_READ_LIMIT = 100
 READ_BATCH_SIZE = 100
 # channels.deleteMessages принимает до 100 id за запрос.
 DELETE_IDS_MAX = 100
+# Картинка едет через шину base64-строкой в Redis: держим её небольшой.
+MEDIA_MAX_BYTES = 5 * 1024 * 1024
+_IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpg"),
+)
 FLOOD_RETRY_MAX_SECONDS = 30
 PARSE_MODES: tuple[str, ...] = ("html", "md")
 _MAX_MESSAGE_ID = 2**31 - 1
@@ -339,6 +350,15 @@ class DeleteRequest:
     expires_at: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class MediaRequest:
+    chat: str | int
+    message_id: int
+    data: bytes = field(repr=False)
+    file_name: str
+    expires_at: float | None = None
+
+
 def parse_read_payload(payload: dict[str, Any]) -> ReadRequest:
     """READ_CHANNEL_POSTS: {chat, limit ≤ 500, offset_id = 0, ids?}.
 
@@ -399,6 +419,38 @@ def parse_delete_payload(payload: dict[str, Any]) -> DeleteRequest:
         raise InvalidInputError(f"Field 'ids' accepts at most {DELETE_IDS_MAX} ids")
     ids = tuple(dict.fromkeys(_positive_id(value, "ids[]") for value in raw_ids))
     return DeleteRequest(chat=chat, ids=ids, expires_at=_expires_at(payload))
+
+
+def parse_media_payload(payload: dict[str, Any]) -> MediaRequest:
+    """EDIT_MEDIA: {chat, message_id, image_b64 (PNG или JPEG ≤ 5 МБ), expires_at?}."""
+    chat = channel_reference(payload.get("chat"))
+    message_id = _positive_id(payload.get("message_id"), "message_id")
+    raw = payload.get("image_b64")
+    if not isinstance(raw, str) or not raw:
+        raise InvalidInputError("Field 'image_b64' must be a non-empty base64 string")
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError):
+        raise InvalidInputError("Field 'image_b64' is not valid base64") from None
+    if len(data) > MEDIA_MAX_BYTES:
+        raise InvalidInputError(f"Image is larger than {MEDIA_MAX_BYTES // (1024 * 1024)} MB")
+    kind = image_kind(data)
+    if kind is None:
+        raise InvalidInputError("Only PNG or JPEG images are accepted")
+    return MediaRequest(
+        chat=chat,
+        message_id=message_id,
+        data=data,
+        file_name=f"post_{message_id}.{kind}",
+        expires_at=_expires_at(payload),
+    )
+
+
+def image_kind(data: bytes) -> str | None:
+    for signature, kind in _IMAGE_SIGNATURES:
+        if data.startswith(signature):
+            return kind
+    return None
 
 
 def _expires_at(payload: dict[str, Any]) -> float | None:
@@ -1111,6 +1163,96 @@ def _check_deadline(expires_at: float | None, now: Now, message: str, **details:
     raise ChannelPostError("command_expired", message, **details)
 
 
+# --- замена фото --------------------------------------------------------------
+async def replace_photo(
+    client: Any,
+    request: MediaRequest,
+    *,
+    sleep: Sleep = asyncio.sleep,
+    now: Now = utcnow,
+) -> dict[str, Any]:
+    """Меняет фото поста. Подпись остаётся как была: тот же текст и те же entities."""
+    from telethon.errors import MessageNotModifiedError, RPCError
+
+    expired = (
+        f"Команда замены фото поста {request.message_id} просрочена: воркер взял её позже, "
+        "чем её ждали, — фото не заменено"
+    )
+    _check_deadline(request.expires_at, now, expired, message_id=request.message_id)
+
+    budget = _FloodBudget(sleep)
+    with _flood_waits_surface(client):
+        entity = await budget.run(
+            partial(resolve_chat_entity, client, request.chat), step="resolve"
+        )
+        require_channel(entity)
+        current = await _telegram_call(
+            budget,
+            partial(client.get_messages, entity, ids=request.message_id),
+            step="get_message",
+        )
+        if current is None:
+            raise ChannelPostError(
+                "message_not_found",
+                f"Поста {request.message_id} нет в этом чате (удалён или неверный id)",
+                message_id=request.message_id,
+            )
+        kind = media_type(current)
+        if kind != "photo":
+            raise ChannelPostError(
+                "not_a_photo",
+                f"У поста {request.message_id} не фото ({kind or 'нет медиа'}) — "
+                "заменить можно только фото на фото",
+                message_id=request.message_id,
+                media_type=kind,
+            )
+
+        caption = getattr(current, "message", None) or ""
+        entities = list(getattr(current, "entities", None) or [])
+        log_fields = {
+            "tg_chat_id": describe_chat(entity)["id"],
+            "message_id": request.message_id,
+            "bytes": len(request.data),
+        }
+
+        async def apply_replace() -> Any:
+            _check_deadline(request.expires_at, now, expired, message_id=request.message_id)
+            upload = io.BytesIO(request.data)
+            upload.name = request.file_name
+            return await client.edit_message(
+                entity,
+                request.message_id,
+                caption,
+                formatting_entities=entities,
+                file=upload,
+                link_preview=False,
+            )
+
+        try:
+            await budget.run(apply_replace, step="edit_media", **log_fields)
+        except MessageNotModifiedError:
+            logger.info("channel_post_photo_not_modified", **log_fields)
+            return {
+                "message_id": request.message_id,
+                "replaced": False,
+                "no_change": True,
+                "flood_waited": budget.waited,
+            }
+        except RPCError as exc:
+            raise telegram_error(exc) from None
+        except ValueError as exc:
+            raise telegram_unavailable(exc) from None
+
+    logger.info("channel_post_photo_replaced", **log_fields)
+    return {
+        "message_id": request.message_id,
+        "replaced": True,
+        "no_change": False,
+        "caption_length": utf16_length(caption),
+        "flood_waited": budget.waited,
+    }
+
+
 # --- удаление ----------------------------------------------------------------
 async def delete_posts(
     client: Any,
@@ -1230,6 +1372,13 @@ def telegram_error(exc: BaseException) -> AppError:
             "Истёк срок, в который Telegram разрешает править это сообщение",
         ),
         (tg.MediaCaptionTooLongError, "caption_too_long", "Подпись к медиа слишком длинная"),
+        (tg.ImageProcessFailedError, "bad_image", "Telegram не смог обработать картинку"),
+        (
+            tg.PhotoInvalidDimensionsError,
+            "bad_image",
+            "Telegram не принял размеры картинки (слишком вытянутая или большая)",
+        ),
+        (tg.PhotoExtInvalidError, "bad_image", "Telegram не принял формат картинки"),
         (tg.MessageTooLongError, "text_too_long", "Текст слишком длинный"),
         (tg.MessageEmptyError, "empty_text", "Telegram не принимает пустой текст"),
         (tg.ChannelPrivateError, "channel_private", "Канал приватный или аккаунт в нём не состоит"),

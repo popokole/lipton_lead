@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import uuid
 from collections.abc import Callable
@@ -30,16 +31,19 @@ from app.tools.channel_posts import (
     DeleteOptions,
     EditOptions,
     IdsError,
+    MediaOptions,
     PlanError,
     PlanItem,
     build_parser,
     check_item,
     diff_summary,
+    load_media_plan,
     load_plan,
     parse_ids,
     parse_plan,
     run_delete,
     run_edit,
+    run_media,
     run_read,
 )
 
@@ -99,6 +103,7 @@ class FakeWorker:
         on_first_edit: Callable[[], None] | None = None,
         partial_at_offset: int | None = None,
         delete_script: dict[int, list[Any]] | None = None,
+        media_script: dict[int, list[Any]] | None = None,
         undeletable: set[int] | None = None,
         on_first_delete: Callable[[], None] | None = None,
     ) -> None:
@@ -112,7 +117,12 @@ class FakeWorker:
         self.delete_script = delete_script or {}
         self.undeletable = undeletable or set()
         self.on_first_delete = on_first_delete
+        self.media_script = media_script or {}
         self.commands: list[Command] = []
+
+    @property
+    def media(self) -> list[Command]:
+        return [c for c in self.commands if c.type is CommandType.EDIT_MEDIA]
 
     @property
     def deletes(self) -> list[Command]:
@@ -147,6 +157,14 @@ class FakeWorker:
                 return answer
             self._apply(command.payload)
             return CommandResult.success(command.id, edited=True, no_change=False, flood_waited=0)
+        if command.type is CommandType.EDIT_MEDIA:
+            script = self.media_script.get(command.payload["message_id"]) or []
+            if script:
+                answer = script.pop(0)
+                if isinstance(answer, BaseException):
+                    raise answer
+                return answer
+            return CommandResult.success(command.id, replaced=True, no_change=False, flood_waited=0)
         if command.type is CommandType.DELETE_MESSAGES:
             if len(self.deletes) == 1 and self.on_first_delete is not None:
                 self.on_first_delete()
@@ -1235,3 +1253,122 @@ class TestDeleteApply:
         item = delete_results(tmp_path)["items"][0]
         assert item["status"] == "unknown"
         assert item["error_code"] == "delete_unconfirmed"
+
+
+# --- media -------------------------------------------------------------------
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+def media_plan(tmp_path: Path, entries: list[dict[str, Any]]) -> Path:
+    plan = tmp_path / "media.json"
+    plan.write_text(json.dumps(entries), encoding="utf-8")
+    return plan
+
+
+class TestMediaPlan:
+    def test_relative_paths_from_plan_folder(self, tmp_path: Path) -> None:
+        (tmp_path / "cards").mkdir()
+        (tmp_path / "cards" / "1.png").write_bytes(PNG)
+
+        items = load_media_plan(media_plan(tmp_path, [{"id": 1, "file": "cards/1.png"}]))
+
+        assert [(i.id, i.path.name, i.kind, i.data) for i in items] == [(1, "1.png", "png", PNG)]
+
+    def test_collects_all_problems(self, tmp_path: Path) -> None:
+        (tmp_path / "a.gif").write_bytes(b"GIF89a")
+        (tmp_path / "ok.png").write_bytes(PNG)
+        plan = media_plan(
+            tmp_path,
+            [
+                {"id": 1, "file": "missing.png"},
+                {"id": 2, "file": "a.gif"},
+                {"id": 0, "file": "ok.png"},
+                {"id": 3},
+                {"id": 4, "file": "ok.png"},
+                {"id": 4, "file": "ok.png"},
+            ],
+        )
+
+        with pytest.raises(PlanError) as caught:
+            load_media_plan(plan)
+
+        text = str(caught.value)
+        for fragment in ("#1", "#2", "элемент 3", "#3", "элемент 6"):
+            assert fragment in text
+
+
+async def media(
+    worker: FakeWorker,
+    tmp_path: Path,
+    ids: list[int],
+    *,
+    lines: list[str] | None = None,
+    **opts: Any,
+) -> int:
+    for post_id in ids:
+        (tmp_path / f"{post_id}.png").write_bytes(PNG)
+    plan = load_media_plan(media_plan(tmp_path, [{"id": i, "file": f"{i}.png"} for i in ids]))
+    return await run_media(
+        worker,
+        account_id=ACCOUNT,
+        chat="@templates",
+        plan=plan,
+        options=MediaOptions(backup_dir=tmp_path, **opts),
+        echo=(lines if lines is not None else []).append,
+        sleep=RecordingSleep(),
+        now=lambda: NOW,
+    )
+
+
+class TestRunMedia:
+    async def test_dry_run_checks_posts_are_photos(self, tmp_path: Path) -> None:
+        worker = FakeWorker([post(1, "a", media_type="photo"), post(2, "b")])
+        lines: list[str] = []
+
+        code = await media(worker, tmp_path, [1, 2, 3], lines=lines)
+
+        assert code == EXIT_INVALID
+        assert worker.media == []
+        assert "Итого: к замене 1, с ошибками 2" in lines
+
+    async def test_apply_sends_image_with_pause(self, tmp_path: Path) -> None:
+        worker = FakeWorker([post(1, "a", media_type="photo"), post(2, "b", media_type="photo")])
+
+        code = await media(worker, tmp_path, [1, 2], apply=True)
+
+        assert code == EXIT_OK
+        assert [c.payload["message_id"] for c in worker.media] == [1, 2]
+        assert worker.media[0].payload["chat"] == MARKED_ID
+        assert base64.b64decode(worker.media[0].payload["image_b64"]) == PNG
+        report = read_json(tmp_path / f"channel_media_results_{STAMP}.json")
+        assert [(i["id"], i["status"]) for i in report["items"]] == [
+            (1, "replaced"),
+            (2, "replaced"),
+        ]
+
+    async def test_error_stops_the_run(self, tmp_path: Path) -> None:
+        worker = FakeWorker(
+            [post(1, "a", media_type="photo"), post(2, "b", media_type="photo")],
+            media_script={1: [failure("bad_image", "не смог")]},
+        )
+
+        code = await media(worker, tmp_path, [1, 2], apply=True)
+
+        assert code == EXIT_FAILED
+        assert len(worker.media) == 1
+        report = read_json(tmp_path / f"channel_media_results_{STAMP}.json")
+        assert [(i["id"], i["status"]) for i in report["items"]] == [
+            (1, "failed"),
+            (2, "not_attempted"),
+        ]
+
+    async def test_timeout_is_unknown_and_stops(self, tmp_path: Path) -> None:
+        worker = FakeWorker(
+            [post(1, "a", media_type="photo"), post(2, "b", media_type="photo")],
+            media_script={1: [CommandTimeoutError("no answer")]},
+        )
+
+        code = await media(worker, tmp_path, [1, 2], apply=True)
+
+        assert code == EXIT_FAILED
+        assert len(worker.media) == 1

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -32,12 +33,14 @@ from app.telegram.channel_posts import (
     CAPTION_LIMIT,
     DELETE_IDS_MAX,
     FLOOD_RETRY_MAX_SECONDS,
+    MEDIA_MAX_BYTES,
     POST_HTML,
     READ_LIMIT_MAX,
     TEXT_LIMIT,
     ChannelPostError,
     DeleteRequest,
     EditRequest,
+    MediaRequest,
     ReadRequest,
     delete_posts,
     edit_post,
@@ -48,9 +51,11 @@ from app.telegram.channel_posts import (
     parse_delete_payload,
     parse_edit_payload,
     parse_html,
+    parse_media_payload,
     parse_read_payload,
     read_posts,
     rendered_length,
+    replace_photo,
     unparse_html,
 )
 from app.workers.command_handler import CommandHandler
@@ -168,8 +173,13 @@ class ChannelClient:
         *,
         parse_mode: Any = (),
         link_preview: bool = True,
+        formatting_entities: Any = None,
+        file: Any = None,
     ) -> Any:
-        self._record("edit_message", message, text, parse_mode, link_preview)
+        if file is not None:
+            self._record("edit_media", message, text, formatting_entities, file.name, file.read())
+        else:
+            self._record("edit_message", message, text, parse_mode, link_preview)
         if self.edit_errors:
             raise self.edit_errors.pop(0)
         return Msg(id=message, message=text, edit_date=DATE)
@@ -1096,6 +1106,16 @@ class TestCommandHandler:
         assert result.error_code == "invalid_input"
         assert "parse_mode" in (result.error_message or "")
 
+    async def test_edit_media_command(self) -> None:
+        client = ChannelClient(history=[Msg(id=1, message="a", media=photo())])
+
+        result = await make_handler(client).handle(
+            command(CommandType.EDIT_MEDIA, chat="@templates", message_id=1, image_b64=b64(PNG))
+        )
+
+        assert result.ok
+        assert result.data["replaced"] is True
+
     async def test_delete_messages_command(self) -> None:
         client = ChannelClient(history=[Msg(id=2), Msg(id=1)])
 
@@ -1271,6 +1291,119 @@ class TestDeletePosts:
 
         assert caught.value.code == "not_a_channel"
         assert client.count("delete_messages") == 0
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+
+
+def b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+class TestParseMediaPayload:
+    def test_png(self) -> None:
+        request = parse_media_payload(
+            {"chat": "@templates", "message_id": 7, "image_b64": b64(PNG), "expires_at": 5}
+        )
+
+        assert request == MediaRequest(
+            chat="@templates", message_id=7, data=PNG, file_name="post_7.png", expires_at=5.0
+        )
+
+    def test_jpeg_gets_jpg_name(self) -> None:
+        request = parse_media_payload(
+            {"chat": "@templates", "message_id": 7, "image_b64": b64(JPEG)}
+        )
+        assert request.file_name == "post_7.jpg"
+
+    @pytest.mark.parametrize("image", [None, "", 5, "не base64!", b64(b"GIF89a....")])
+    def test_bad_image(self, image: Any) -> None:
+        with pytest.raises(InvalidInputError):
+            parse_media_payload({"chat": "@templates", "message_id": 7, "image_b64": image})
+
+    def test_too_big(self) -> None:
+        big = PNG + b"\x00" * MEDIA_MAX_BYTES
+        with pytest.raises(InvalidInputError, match="larger"):
+            parse_media_payload({"chat": "@templates", "message_id": 7, "image_b64": b64(big)})
+
+    def test_message_id_required(self) -> None:
+        with pytest.raises(InvalidInputError):
+            parse_media_payload({"chat": "@templates", "image_b64": b64(PNG)})
+
+
+def media_request(message_id: int = 10, **kwargs: Any) -> MediaRequest:
+    return MediaRequest(
+        chat="@templates", message_id=message_id, data=PNG, file_name="post_10.png", **kwargs
+    )
+
+
+class TestReplacePhoto:
+    async def test_keeps_caption_and_entities_as_is(self) -> None:
+        bold = types.MessageEntityBold(offset=0, length=4)
+        client = ChannelClient(
+            history=[Msg(id=10, message="текст поста", entities=[bold], media=photo())]
+        )
+
+        result = await replace_photo(client, media_request())
+
+        media_calls = [call for call in client.calls if call[0] == "edit_media"]
+        assert media_calls == [("edit_media", 10, "текст поста", [bold], "post_10.png", PNG)]
+        assert client.count("edit_message") == 0
+        assert result["replaced"] is True
+        assert result["caption_length"] == 11
+
+    async def test_only_photo_posts(self) -> None:
+        client = ChannelClient(history=[Msg(id=10, message="просто текст")])
+
+        with pytest.raises(ChannelPostError) as caught:
+            await replace_photo(client, media_request())
+
+        assert caught.value.code == "not_a_photo"
+        assert client.count("edit_media") == 0
+
+    async def test_missing_post(self) -> None:
+        client = ChannelClient(history=[])
+
+        with pytest.raises(ChannelPostError) as caught:
+            await replace_photo(client, media_request())
+
+        assert caught.value.code == "message_not_found"
+
+    async def test_short_flood_wait_retries_with_the_same_bytes(self) -> None:
+        client = ChannelClient(
+            history=[Msg(id=10, message="x", media=photo())], edit_errors=[flood(3)]
+        )
+        sleep = RecordingSleep()
+
+        result = await replace_photo(client, media_request(), sleep=sleep)
+
+        uploads = [call[5] for call in client.calls if call[0] == "edit_media"]
+        assert uploads == [PNG, PNG]  # второй раз файл читается с начала
+        assert sleep.calls == [4]
+        assert result["flood_waited"] == 3
+
+    async def test_bad_image_has_its_own_code(self) -> None:
+        client = ChannelClient(
+            history=[Msg(id=10, message="x", media=photo())],
+            edit_errors=[errors.ImageProcessFailedError(request=None)],
+        )
+
+        with pytest.raises(ChannelPostError) as caught:
+            await replace_photo(client, media_request())
+
+        assert caught.value.code == "bad_image"
+
+    async def test_expired_command_touches_nothing(self) -> None:
+        client = ChannelClient(history=[Msg(id=10, message="x", media=photo())])
+
+        with pytest.raises(ChannelPostError) as caught:
+            await replace_photo(
+                client, media_request(expires_at=DATE.timestamp() - 1), now=lambda: DATE
+            )
+
+        assert caught.value.code == "command_expired"
+        assert client.calls == []
 
 
 # --- настоящий TelegramClient ------------------------------------------------
