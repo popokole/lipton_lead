@@ -37,6 +37,8 @@ class CommandType(StrEnum):
     EDIT_MESSAGE = "EDIT_MESSAGE"
     EDIT_MEDIA = "EDIT_MEDIA"
     DELETE_MESSAGES = "DELETE_MESSAGES"
+    # Файлы из любого чата аккаунта (только чтение), с выгрузкой на диск воркера.
+    READ_CHAT_MEDIA = "READ_CHAT_MEDIA"
 
 
 class Command(BaseModel):

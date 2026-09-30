@@ -55,8 +55,12 @@ EDIT_MESSAGE уходят воркеру через шину — так же, к
 текстов (channel_delete_backup_<время>.json; медиа по нему не вернуть).
 Файл --ids — JSON-список id или текст вида «12 15 20-40».
 
-План замены фото — JSON-список {"id": <id поста>, "file": "<путь к PNG/JPEG>"};
-относительный путь считается от папки плана. Менять можно только фото на
+План замены фото — JSON-список {"id": <id поста>, "file": "<путь к PNG/JPEG/MP4>"};
+относительный путь считается от папки плана. MP4 (без звука) уходит как
+GIF-анимация, для него в элементе нужны "w", "h" и "duration".
+
+Файлы из любого чата аккаунта (группа, личка): files --chat ... [--download];
+скачанное лежит в контейнере worker в /tmp/chat_media/<id чата>/. Менять можно только фото на
 фото; подпись воркер отправляет обратно без изменений. Старые картинки CLI не
 сохраняет.
 """
@@ -90,14 +94,15 @@ from app.core.logging import configure_logging
 from app.core.runtime import Runtime
 from app.models import Account
 from app.telegram.channel_posts import (
+    ANIMATION_MAX_BYTES,
     MEDIA_MAX_BYTES,
     READ_LIMIT_MAX,
     TEXT_LIMIT,
     entity_signature,
-    image_kind,
     length_limit,
     normalize_chat_reference,
     render_entities,
+    upload_kind,
     utf16_length,
 )
 from app.workers.lease import AccountLease
@@ -141,6 +146,8 @@ MAX_DELETE_IDS = 5000
 MEDIA_EXPIRY_SECONDS = 90.0
 MEDIA_TIMEOUT_SECONDS = 180.0
 DEFAULT_MEDIA_PAUSE_SECONDS = 12.0
+# Выгрузка файлов из чата: скачивание может занять минуты.
+FILES_TIMEOUT_SECONDS = 600.0
 MAX_PAGES = 2000
 _FRAGMENT = 30
 
@@ -1404,6 +1411,7 @@ class MediaItem:
     path: Path
     data: bytes = field(repr=False)
     kind: str
+    animation: dict[str, Any] | None = None
 
 
 def load_media_plan(path: Path) -> list[MediaItem]:
@@ -1447,16 +1455,24 @@ def parse_media_plan(raw: Any, *, base_dir: Path) -> list[MediaItem]:
         except OSError as exc:
             problems.append(f"#{post_id}: не читается {file_path}: {exc.strerror or exc}")
             continue
-        kind = image_kind(data)
+        kind = upload_kind(data)
         if kind is None:
-            problems.append(f"#{post_id}: {file_path.name} — не PNG и не JPEG")
+            problems.append(f"#{post_id}: {file_path.name} — не PNG, JPEG или MP4")
             continue
-        if len(data) > MEDIA_MAX_BYTES:
-            problems.append(
-                f"#{post_id}: {file_path.name} больше {MEDIA_MAX_BYTES // (1024 * 1024)} МБ"
-            )
+        limit = ANIMATION_MAX_BYTES if kind == "mp4" else MEDIA_MAX_BYTES
+        if len(data) > limit:
+            problems.append(f"#{post_id}: {file_path.name} больше {limit // (1024 * 1024)} МБ")
             continue
-        items.append(MediaItem(id=post_id, path=file_path, data=data, kind=kind))
+        animation = None
+        if kind == "mp4":
+            fields = {key: entry.get(key) for key in ("w", "h", "duration")}
+            if any(value is None for value in fields.values()):
+                problems.append(f"#{post_id}: для MP4 нужны w, h и duration")
+                continue
+            animation = fields
+        items.append(
+            MediaItem(id=post_id, path=file_path, data=data, kind=kind, animation=animation)
+        )
     if problems:
         raise PlanError("\n".join(problems))
     return items
@@ -1496,7 +1512,7 @@ async def run_media(
         problem = None
         if post is None:
             problem = "поста нет в канале"
-        elif post.get("media_type") != "photo":
+        elif post.get("media_type") not in ("photo", "animation", "video"):
             problem = f"у поста не фото ({post.get('media_type') or 'нет медиа'})"
         status = "error" if problem else "not_attempted"
         invalid += problem is not None
@@ -1576,12 +1592,14 @@ async def _replace_one(
     waited = 0
     encoded = base64.b64encode(item.data).decode("ascii")
     for attempt in (1, 2):
-        payload = {
+        payload: dict[str, Any] = {
             "chat": target,
             "message_id": item.id,
             "image_b64": encoded,
             "expires_at": now().timestamp() + MEDIA_EXPIRY_SECONDS,
         }
+        if item.animation is not None:
+            payload["animation"] = item.animation
         command = Command(type=CommandType.EDIT_MEDIA, account_id=account_id, payload=payload)
         try:
             result = await caller(command, MEDIA_TIMEOUT_SECONDS)
@@ -1622,6 +1640,50 @@ def _media_label(row: dict[str, Any]) -> str:
     if status == "unknown":
         return "НЕИЗВЕСТНО (воркер не ответил)"
     return f"ОШИБКА {row.get('error_code')}"
+
+
+# --- files -------------------------------------------------------------------
+async def run_files(
+    caller: Caller,
+    *,
+    account_id: uuid.UUID,
+    chat: str,
+    limit: int,
+    download: bool,
+    min_id: int,
+    out_path: Path | None,
+    echo: Echo = print,
+) -> int:
+    """Файлы из чата: список (и выгрузка на диск воркера с --download)."""
+    data = await call_ok(
+        caller,
+        Command(
+            type=CommandType.READ_CHAT_MEDIA,
+            account_id=account_id,
+            payload={"chat": chat, "limit": limit, "download": download, "min_id": min_id},
+        ),
+        FILES_TIMEOUT_SECONDS if download else READ_TIMEOUT_SECONDS,
+    )
+    items = data.get("items") or []
+    echo(f"Чат: {_chat_title(data.get('chat'), chat)}")
+    for item in items:
+        size = item.get("size")
+        size_label = f"{size // 1024} КБ" if isinstance(size, int) else "?"
+        group = " альбом" if item.get("grouped_id") else ""
+        name = item.get("name") or ""
+        text = _snippet(item.get("text") or "")
+        state = " НЕ СКАЧАН (большой)" if item.get("skipped") else ""
+        echo(
+            f"#{item['id']:<7} {str(item.get('date') or '')[:16]:<16} {item['kind']:<10} "
+            f"{size_label:>9}{group} {name} {text}{state}".rstrip()
+        )
+    echo(f"Итого файлов: {len(items)}")
+    if download:
+        echo(f"Скачано в контейнер worker: {data.get('dir')}")
+    if out_path is not None:
+        write_json(out_path, data)
+        echo(f"Список: {out_path}")
+    return EXIT_OK
 
 
 # --- аккаунт -----------------------------------------------------------------
@@ -1687,6 +1749,13 @@ def _page_size(value: str) -> int:
     number = int(value)
     if not 1 <= number <= READ_LIMIT_MAX:
         raise argparse.ArgumentTypeError(f"от 1 до {READ_LIMIT_MAX}")
+    return number
+
+
+def _files_limit(value: str) -> int:
+    number = int(value)
+    if not 1 <= number <= 200:
+        raise argparse.ArgumentTypeError("от 1 до 200")
     return number
 
 
@@ -1814,6 +1883,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     media.add_argument("--results", type=Path, default=None, help="куда записать результаты JSON")
 
+    files = commands.add_parser(
+        "files", parents=[common], help="файлы из чата (группа, личка): список и выгрузка"
+    )
+    files.add_argument(
+        "--limit", type=_files_limit, default=50, help="сколько последних сообщений смотреть"
+    )
+    files.add_argument("--min-id", type=_non_negative_int, default=0, help="только сообщения новее")
+    files.add_argument("--download", action="store_true", help="скачать файлы на диск воркера")
+    files.add_argument("--out", type=Path, default=None, help="куда сохранить список JSON")
+
     delete = commands.add_parser(
         "delete", parents=[common], help="удалить посты у всех (необратимо)"
     )
@@ -1911,6 +1990,16 @@ async def _run(args: argparse.Namespace) -> int:
                 page_size=args.page_size,
                 page_pause=args.page_pause,
                 max_flood_wait=args.max_flood_wait,
+            )
+        if args.command == "files":
+            return await run_files(
+                caller,
+                account_id=account_id,
+                chat=args.chat,
+                limit=args.limit,
+                download=args.download,
+                min_id=args.min_id,
+                out_path=args.out,
             )
         if args.command == "media":
             return await run_media(

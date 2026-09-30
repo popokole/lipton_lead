@@ -30,6 +30,7 @@ from app.telegram.channel_posts import (
     replace_photo,
     resolve_chat_entity,
 )
+from app.telegram.chat_media import list_chat_media, parse_chat_media_payload
 from app.telegram.client_manager import ClientManager
 from app.telegram.sender import MessageSender
 from app.telegram.session_manager import SessionManager
@@ -91,6 +92,7 @@ class CommandHandler:
             CommandType.EDIT_MESSAGE: self._edit_message,
             CommandType.EDIT_MEDIA: self._edit_media,
             CommandType.DELETE_MESSAGES: self._delete_messages,
+            CommandType.READ_CHAT_MEDIA: self._read_chat_media,
         }
         handler = handlers.get(command.type)
         if handler is None:
@@ -253,6 +255,11 @@ class CommandHandler:
         request = parse_media_payload(command.payload)
         client = self._require_client(command.account_id)
         return await replace_photo(client, request)
+
+    async def _read_chat_media(self, command: Command) -> dict[str, Any]:
+        request = parse_chat_media_payload(command.payload)
+        client = self._require_client(command.account_id)
+        return await list_chat_media(client, request)
 
     async def _delete_messages(self, command: Command) -> dict[str, Any]:
         request = parse_delete_payload(command.payload)

@@ -72,6 +72,8 @@ READ_BATCH_SIZE = 100
 DELETE_IDS_MAX = 100
 # Картинка едет через шину base64-строкой в Redis: держим её небольшой.
 MEDIA_MAX_BYTES = 5 * 1024 * 1024
+# MP4 без звука уходит как GIF-анимация Telegram.
+ANIMATION_MAX_BYTES = 12 * 1024 * 1024
 _IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", "png"),
     (b"\xff\xd8\xff", "jpg"),
@@ -357,6 +359,8 @@ class MediaRequest:
     data: bytes = field(repr=False)
     file_name: str
     expires_at: float | None = None
+    # Для MP4-анимации: ширина, высота, длительность (с). У фото — None.
+    animation: tuple[int, int, float] | None = None
 
 
 def parse_read_payload(payload: dict[str, Any]) -> ReadRequest:
@@ -422,7 +426,10 @@ def parse_delete_payload(payload: dict[str, Any]) -> DeleteRequest:
 
 
 def parse_media_payload(payload: dict[str, Any]) -> MediaRequest:
-    """EDIT_MEDIA: {chat, message_id, image_b64 (PNG или JPEG ≤ 5 МБ), expires_at?}."""
+    """EDIT_MEDIA: {chat, message_id, image_b64, expires_at?, animation?}.
+
+    image_b64 — PNG/JPEG ≤ 5 МБ или MP4 ≤ 12 МБ; для MP4 обязателен
+    animation: {w, h, duration} — он уйдёт как GIF-анимация Telegram."""
     chat = channel_reference(payload.get("chat"))
     message_id = _positive_id(payload.get("message_id"), "message_id")
     raw = payload.get("image_b64")
@@ -432,18 +439,47 @@ def parse_media_payload(payload: dict[str, Any]) -> MediaRequest:
         data = base64.b64decode(raw, validate=True)
     except (binascii.Error, ValueError):
         raise InvalidInputError("Field 'image_b64' is not valid base64") from None
-    if len(data) > MEDIA_MAX_BYTES:
-        raise InvalidInputError(f"Image is larger than {MEDIA_MAX_BYTES // (1024 * 1024)} MB")
-    kind = image_kind(data)
+    kind = upload_kind(data)
     if kind is None:
-        raise InvalidInputError("Only PNG or JPEG images are accepted")
+        raise InvalidInputError("Only PNG, JPEG or MP4 files are accepted")
+    limit = ANIMATION_MAX_BYTES if kind == "mp4" else MEDIA_MAX_BYTES
+    if len(data) > limit:
+        raise InvalidInputError(f"File is larger than {limit // (1024 * 1024)} MB")
+    animation = _animation_field(payload.get("animation")) if kind == "mp4" else None
     return MediaRequest(
         chat=chat,
         message_id=message_id,
         data=data,
         file_name=f"post_{message_id}.{kind}",
         expires_at=_expires_at(payload),
+        animation=animation,
     )
+
+
+def _animation_field(raw: Any) -> tuple[int, int, float]:
+    if not isinstance(raw, dict):
+        raise InvalidInputError("MP4 needs field 'animation': {w, h, duration}")
+    width, height, duration = raw.get("w"), raw.get("h"), raw.get("duration")
+    for name, value in (("w", width), ("h", height)):
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= 4096:
+            raise InvalidInputError(f"Field 'animation.{name}' must be 1..4096")
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, int | float)
+        or not 0 < duration <= 60
+    ):
+        raise InvalidInputError("Field 'animation.duration' must be 0..60 seconds")
+    return int(width), int(height), float(duration)  # type: ignore[arg-type]
+
+
+def upload_kind(data: bytes) -> str | None:
+    """png / jpg / mp4 по сигнатуре файла."""
+    kind = image_kind(data)
+    if kind is not None:
+        return kind
+    if len(data) > 12 and data[4:8] == b"ftyp":
+        return "mp4"
+    return None
 
 
 def image_kind(data: bytes) -> str | None:
@@ -1164,6 +1200,9 @@ def _check_deadline(expires_at: float | None, now: Now, message: str, **details:
 
 
 # --- замена фото --------------------------------------------------------------
+_REPLACEABLE_KINDS = frozenset({"photo", "animation", "video"})
+
+
 async def replace_photo(
     client: Any,
     request: MediaRequest,
@@ -1198,13 +1237,19 @@ async def replace_photo(
                 message_id=request.message_id,
             )
         kind = media_type(current)
-        if kind != "photo":
+        if kind not in _REPLACEABLE_KINDS:
             raise ChannelPostError(
                 "not_a_photo",
                 f"У поста {request.message_id} не фото ({kind or 'нет медиа'}) — "
-                "заменить можно только фото на фото",
+                "заменить можно только фото или анимацию",
                 message_id=request.message_id,
                 media_type=kind,
+            )
+        if request.animation is not None and getattr(current, "grouped_id", None):
+            raise ChannelPostError(
+                "in_album",
+                f"Пост {request.message_id} — часть альбома: там фото на анимацию не меняется",
+                message_id=request.message_id,
             )
 
         caption = getattr(current, "message", None) or ""
@@ -1219,6 +1264,15 @@ async def replace_photo(
             _check_deadline(request.expires_at, now, expired, message_id=request.message_id)
             upload = io.BytesIO(request.data)
             upload.name = request.file_name
+            extra: dict[str, Any] = {}
+            if request.animation is not None:
+                width, height, duration = request.animation
+                extra["attributes"] = [
+                    tl_types.DocumentAttributeVideo(
+                        duration=duration, w=width, h=height, supports_streaming=True, nosound=True
+                    ),
+                    tl_types.DocumentAttributeAnimated(),
+                ]
             return await client.edit_message(
                 entity,
                 request.message_id,
@@ -1226,6 +1280,7 @@ async def replace_photo(
                 formatting_entities=entities,
                 file=upload,
                 link_preview=False,
+                **extra,
             )
 
         try:
