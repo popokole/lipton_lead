@@ -19,16 +19,19 @@ from app.database.session import Database
 from app.telegram.account_manager import AccountManager
 from app.telegram.auth_flow import AuthFlow, SignInResult
 from app.telegram.channel_posts import (
+    TEXT_LIMIT,
     delete_posts,
     edit_post,
     normalize_chat_reference,
     parse_delete_payload,
     parse_edit_payload,
+    parse_html,
     parse_media_payload,
     parse_read_payload,
     read_posts,
     replace_photo,
     resolve_chat_entity,
+    utf16_length,
 )
 from app.telegram.chat_media import list_chat_media, parse_chat_media_payload
 from app.telegram.client_manager import ClientManager
@@ -224,10 +227,43 @@ class CommandHandler:
         }
 
     async def _send_message(self, command: Command) -> dict[str, Any]:
-        client = self._require_client(command.account_id)
-        chat_id = int(self._required(command, "chat_id"))
+        """SEND_MESSAGE: {chat_id | to, text, reply_to?, parse_mode: html|None,
+        link_preview?, expect_user_id?}.
+
+        `to` (@username, ссылка t.me, id) и `parse_mode=html` — для ручных
+        сообщений из CLI (app/tools/send_message.py); `expect_user_id` не даёт
+        отправить не тому, если username сменил владельца.
+        """
+        payload = command.payload
+        parse_mode = payload.get("parse_mode")
+        if parse_mode not in (None, "html"):
+            raise InvalidInputError("Field 'parse_mode' must be 'html' or null")
+        link_preview = payload.get("link_preview")
+        if link_preview is not None and not isinstance(link_preview, bool):
+            raise InvalidInputError("Field 'link_preview' must be a boolean")
         text = str(self._required(command, "text"))
-        reply_to = command.payload.get("reply_to")
+        reply_to = payload.get("reply_to")
+
+        entities: list[Any] | None = None
+        if parse_mode == "html":
+            text, entities = parse_html(text)
+        if not text.strip():
+            raise InvalidInputError("Message text is empty")
+        if utf16_length(text) > TEXT_LIMIT:
+            raise InvalidInputError(f"Message is longer than {TEXT_LIMIT} characters")
+
+        client = self._require_client(command.account_id)
+        peer: Any | None = None
+        if payload.get("to") is not None:
+            peer = await resolve_chat_entity(client, normalize_chat_reference(payload["to"]))
+            chat_id = int(peer.id)
+        else:
+            chat_id = int(self._required(command, "chat_id"))
+        expected = payload.get("expect_user_id")
+        if expected is not None and int(expected) != chat_id:
+            raise InvalidInputError(
+                "Recipient does not match expect_user_id", expected=int(expected), actual=chat_id
+            )
 
         sent = await self._sender.send(
             command.account_id,
@@ -235,6 +271,9 @@ class CommandHandler:
             chat_id=chat_id,
             text=text,
             reply_to=int(reply_to) if reply_to is not None else None,
+            peer=peer,
+            formatting_entities=entities,
+            link_preview=link_preview,
         )
         return {"tg_message_id": sent.tg_message_id, "chat_id": sent.chat_id}
 

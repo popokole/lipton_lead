@@ -199,3 +199,44 @@ async def test_forget_clears_account_state() -> None:
     started = asyncio.get_running_loop().time()
     await sender.send(ACCOUNT, client, chat_id=CHAT, text="b")
     assert asyncio.get_running_loop().time() - started < 1.0
+
+
+async def test_formatting_entities_and_preview_reach_telegram() -> None:
+    """Ручное сообщение из CLI: разметка уходит готовыми сущностями, не parse_mode."""
+    sender = MessageSender(
+        make_settings(
+            send_min_interval_seconds=0,
+            reply_typing_delay_min_seconds=0,
+            reply_typing_delay_max_seconds=0,
+        )
+    )
+    client = FakeTelegramClient()
+    entities = [object()]
+
+    await sender.send(
+        ACCOUNT,
+        client,
+        chat_id=CHAT,
+        text="цитата",
+        formatting_entities=entities,
+        link_preview=False,
+    )
+
+    assert client.sent == [(CHAT, "цитата", None)]
+    assert client.sent_extra == [{"formatting_entities": entities, "link_preview": False}]
+
+
+async def test_plain_send_passes_no_extra_options() -> None:
+    """Автоответы не меняются: без разметки send_message зовётся как раньше."""
+    sender = MessageSender(
+        make_settings(
+            send_min_interval_seconds=0,
+            reply_typing_delay_min_seconds=0,
+            reply_typing_delay_max_seconds=0,
+        )
+    )
+    client = FakeTelegramClient()
+
+    await sender.send(ACCOUNT, client, chat_id=CHAT, text="привет")
+
+    assert client.sent_extra == [{}]

@@ -102,6 +102,8 @@ class FakeTelegramClient:
     logged_out: bool = False
     handlers: list[tuple[Any, Any]] = field(default_factory=list)
     sent: list[tuple[int, str, int | None]] = field(default_factory=list)
+    # Доп. параметры send_message (formatting_entities, link_preview) по порядку.
+    sent_extra: list[dict[str, Any]] = field(default_factory=list)
     read_acknowledged: list[tuple[int, int | None]] = field(default_factory=list)
     typing_actions: list[tuple[int, str]] = field(default_factory=list)
     signed_in_with: dict[str, Any] = field(default_factory=dict)
@@ -138,12 +140,13 @@ class FakeTelegramClient:
         return self.connected
 
     async def send_message(
-        self, entity: Any, message: str, *, reply_to: int | None = None
+        self, entity: Any, message: str, *, reply_to: int | None = None, **kwargs: Any
     ) -> FakeSentMessage:
         if self.flood_wait_seconds is not None and not self._flood_raised:
             self._flood_raised = True
             raise FloodWaitError(request=None, capture=self.flood_wait_seconds)
         self.sent.append((int(entity), message, reply_to))
+        self.sent_extra.append(kwargs)
         self._next_message_id += 1
         return FakeSentMessage(id=self._next_message_id)
 

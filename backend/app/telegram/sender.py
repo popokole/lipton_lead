@@ -54,13 +54,22 @@ class MessageSender:
         text: str,
         reply_to: int | None = None,
         peer: Any | None = None,
+        formatting_entities: list[Any] | None = None,
+        link_preview: bool | None = None,
     ) -> SentMessage:
+        # formatting_entities — готовая разметка (цитаты, жирный…) для ручных
+        # сообщений из CLI; автоответы идут простым текстом, как раньше.
+        extra: dict[str, Any] = {}
+        if formatting_entities is not None:
+            extra["formatting_entities"] = formatting_entities
+        if link_preview is not None:
+            extra["link_preview"] = link_preview
         lock = self._locks.setdefault(account_id, asyncio.Lock())
         async with lock:
             await self._respect_interval(account_id)
             target: Any = peer if peer is not None else chat_id
             await self._simulate_human_delay(account_id, client, target, reply_to)
-            return await self._send_once(account_id, client, chat_id, text, reply_to, peer)
+            return await self._send_once(account_id, client, chat_id, text, reply_to, peer, extra)
 
     async def _simulate_human_delay(
         self,
@@ -114,6 +123,7 @@ class MessageSender:
         text: str,
         reply_to: int | None,
         peer: Any | None,
+        extra: dict[str, Any] | None = None,
     ) -> SentMessage:
         from telethon.errors import FloodWaitError, RPCError
 
@@ -124,7 +134,7 @@ class MessageSender:
 
         for attempt in (1, 2):
             try:
-                sent = await client.send_message(target, text, reply_to=reply_to)
+                sent = await client.send_message(target, text, reply_to=reply_to, **(extra or {}))
             except FloodWaitError as exc:
                 if attempt == 2 or exc.seconds > self._settings.flood_wait_max_seconds:
                     logger.warning(
