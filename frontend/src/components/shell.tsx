@@ -6,15 +6,16 @@ import {
   LayoutGrid,
   MessageSquare,
   Server,
+  Menu,
   ShieldAlert,
-  Sparkles,
+  SlidersHorizontal,
   Target,
 } from 'lucide-react';
-import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import type { ComponentType } from 'react';
 
+import { Button, IconButton, NavLink, RowButton } from '@/components/ui';
 import { api, logout, tokens } from '@/lib/api';
 import type { CurrentUser } from '@/lib/types';
 
@@ -37,7 +38,7 @@ const NAV: NavGroup[] = [
   { section: 'Общение', icon: MessageSquare, items: [{ href: '/communication', label: 'Общение', icon: MessageSquare }] },
   { section: 'Лиды', icon: Target, items: [{ href: '/leads', label: 'Лиды', icon: Target }] },
   { section: 'Внимание', icon: ShieldAlert, items: [{ href: '/attention', label: 'Внимание', icon: ShieldAlert }] },
-  { section: 'Настройка ИИ', icon: Sparkles, items: [{ href: '/ai', label: 'Настройка ИИ', icon: Sparkles }] },
+  { section: 'Настройка ИИ', icon: SlidersHorizontal, items: [{ href: '/ai', label: 'Настройка ИИ', icon: SlidersHorizontal }] },
   { section: 'Система', icon: Server, items: [{ href: '/system', label: 'Система', icon: Server }] },
 ];
 
@@ -94,15 +95,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <div className="text-xs text-slate-500">панель управления</div>
       </div>
       <nav className="space-y-0.5">
-        <Link
-          href="/"
-          className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition ${
-            pathname === '/' ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:bg-ink-800'
-          }`}
-        >
-          <Home size={16} />
+        <NavLink href="/" active={pathname === '/'} icon={<Home size={16} />}>
           Главная
-        </Link>
+        </NavLink>
         <div className="my-2 border-t border-ink-800" />
         {NAV.map((group) => {
           if (group.items.length === 1) {
@@ -110,16 +105,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
             const active = pathname.startsWith(item.href);
             const Icon = item.icon;
             return (
-              <Link
-                key={group.section}
-                href={item.href}
-                className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition ${
-                  active ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:bg-ink-800'
-                }`}
-              >
-                <Icon size={16} />
+              <NavLink key={group.section} href={item.href} active={active} icon={<Icon size={16} />}>
                 {item.label}
-              </Link>
+              </NavLink>
             );
           }
 
@@ -127,9 +115,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
           const expanded = openSection === group.section;
           return (
             <div key={group.section}>
-              <button
+              <RowButton
                 onClick={() => setOpenSection(expanded ? null : group.section)}
-                className="flex w-full items-center justify-between gap-2.5 rounded-lg px-3 py-2 text-sm text-slate-400 transition hover:bg-ink-800"
+                className="justify-between rounded-lg px-3 py-2 text-sm"
               >
                 <span className="flex items-center gap-2.5">
                   <GroupIcon size={16} />
@@ -139,23 +127,16 @@ export function Shell({ children }: { children: React.ReactNode }) {
                   size={14}
                   className={`transition-transform ${expanded ? 'rotate-180' : ''}`}
                 />
-              </button>
+              </RowButton>
               {expanded && (
                 <div className="ml-3 space-y-0.5 border-l border-ink-800 pl-3">
                   {group.items.map((item) => {
                     const active = pathname.startsWith(item.href);
                     const Icon = item.icon;
                     return (
-                      <Link
-                        key={item.href}
-                        href={item.href}
-                        className={`flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm transition ${
-                          active ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:bg-ink-800'
-                        }`}
-                      >
-                        <Icon size={15} />
+                      <NavLink key={item.href} href={item.href} active={active} size="sm" icon={<Icon size={16} />}>
                         {item.label}
-                      </Link>
+                      </NavLink>
                     );
                   })}
                 </div>
@@ -167,12 +148,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
       <div className="mt-6 border-t border-ink-800 px-3 pt-4">
         <div className="truncate text-xs text-slate-400">{user?.email ?? '—'}</div>
         <div className="text-xs text-slate-600">{user?.role ?? ''}</div>
-        <button
-          onClick={logout}
-          className="mt-3 text-xs text-slate-500 underline-offset-2 hover:text-slate-300 hover:underline"
-        >
+        <Button variant="text" onClick={logout} className="mt-3">
           Выйти
-        </button>
+        </Button>
       </div>
     </>
   );
@@ -181,13 +159,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-screen flex-col lg:flex-row">
       {/* Верхняя панель с бургером — только на мобиле */}
       <header className="sticky top-0 z-30 flex items-center gap-3 border-b border-ink-800 bg-ink-900/80 px-4 py-3 backdrop-blur lg:hidden">
-        <button
-          onClick={() => setMenuOpen(true)}
-          aria-label="Меню"
-          className="rounded-lg border border-ink-700 px-2.5 py-1.5 text-slate-300"
-        >
-          ☰
-        </button>
+        <IconButton label="Меню" onClick={() => setMenuOpen(true)}>
+          <Menu size={18} />
+        </IconButton>
         <span className="text-sm font-semibold text-slate-100">Telegram AI</span>
       </header>
 

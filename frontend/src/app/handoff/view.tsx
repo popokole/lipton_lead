@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 
-import { Button, Card, ChatAvatar, Empty, ErrorText, PageHeader } from '@/components/ui';
+import { Button, Card, ChatAvatar, Empty, ErrorText, Heading, PageHeader } from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 import { useApi, useRealtime } from '@/lib/hooks';
 import type { Escalation } from '@/lib/types';
@@ -65,10 +65,10 @@ export function HandoffView() {
                   />
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="truncate text-sm font-medium text-slate-100">
+                      <Heading level={3} className="truncate">
                         {item.chat_title ??
                           (item.chat_username ? `@${item.chat_username}` : item.peer_tg_id)}
-                      </h3>
+                      </Heading>
                       <span className="text-xs text-slate-500">
                         {item.account_label ?? item.account_id}
                       </span>

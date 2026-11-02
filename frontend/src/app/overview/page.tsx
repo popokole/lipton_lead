@@ -3,7 +3,7 @@
 import { useId } from 'react';
 
 import { Shell } from '@/components/shell';
-import { Card, Empty, ErrorText, PageHeader, Stat, StatusBadge } from '@/components/ui';
+import { Card, Empty, ErrorText, Heading, PageHeader, Stat, StatusBadge } from '@/components/ui';
 import { useApi } from '@/lib/hooks';
 import type { DailyPoint, DashboardCounters, ScenarioLeadStat } from '@/lib/types';
 
@@ -59,7 +59,7 @@ function WeekAreaChart({ series, color }: { series: DailyPoint[]; color: string 
       {/* значения над точками */}
       <div className="flex">
         {bars.map((bar) => (
-          <div key={bar.key} className="flex-1 text-center text-[11px] font-medium text-slate-300">
+          <div key={bar.key} className="flex-1 text-center text-xs font-medium tabular-nums text-slate-300">
             {bar.value || ''}
           </div>
         ))}
@@ -86,7 +86,7 @@ function WeekAreaChart({ series, color }: { series: DailyPoint[]; color: string 
       {/* подписи дней */}
       <div className="flex">
         {bars.map((bar) => (
-          <div key={bar.key} className="flex-1 text-center text-[11px] text-slate-600">
+          <div key={bar.key} className="flex-1 text-center text-xs text-slate-500">
             {bar.label}
           </div>
         ))}
@@ -98,8 +98,8 @@ function WeekAreaChart({ series, color }: { series: DailyPoint[]; color: string 
 function Metric({ value, label, tone }: { value: number; label: string; tone?: string }) {
   return (
     <div>
-      <div className={`text-xl font-semibold ${tone ?? 'text-slate-100'}`}>{value}</div>
-      <div className="text-[11px] uppercase tracking-wide text-slate-500">{label}</div>
+      <div className={`text-xl font-semibold tabular-nums ${tone ?? 'text-slate-100'}`}>{value}</div>
+      <div className="text-xs text-slate-500">{label}</div>
     </div>
   );
 }
@@ -109,7 +109,7 @@ function DirectionCard({ stat, color }: { stat: ScenarioLeadStat; color: string 
   return (
     <Card
       title={stat.name}
-      actions={stat.hot > 0 ? <StatusBadge tone="bad">🔥 {stat.hot}</StatusBadge> : null}
+      actions={stat.hot > 0 ? <StatusBadge tone="bad">горячих: {stat.hot}</StatusBadge> : null}
     >
       <div className="mb-3 grid grid-cols-4 gap-3">
         <Metric value={stat.total} label="всего" />
@@ -164,7 +164,7 @@ export default function OverviewPage() {
       </div>
 
       <div className="mt-8">
-        <h2 className="mb-4 text-lg font-semibold text-slate-100">Лиды по направлениям</h2>
+        <Heading level={2} className="mb-4">Лиды по направлениям</Heading>
         <ErrorText>{leadsByScenario.error}</ErrorText>
         {directions.length === 0 ? (
           <Card>

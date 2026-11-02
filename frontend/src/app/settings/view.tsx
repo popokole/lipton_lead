@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 
-import { Button, Card, ErrorText, Field, PageHeader, inputClass } from '@/components/ui';
+import { Button, Card, Checkbox, ErrorText, Field, Heading, Input, PageHeader, Textarea } from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 
 interface NotifyStatus {
@@ -103,8 +103,7 @@ export function SettingsView() {
 
         <div className="grid gap-4 lg:grid-cols-2">
           <Field label="Токен бота" hint={status?.configured ? 'Токен сохранён. Введите новый, чтобы заменить' : 'Из @BotFather'}>
-            <input
-              className={inputClass}
+            <Input
               type="password"
               value={token}
               onChange={(e) => setToken(e.target.value)}
@@ -112,8 +111,7 @@ export function SettingsView() {
             />
           </Field>
           <Field label="ID форум-группы" hint="Отрицательный, напр. -1001234567890">
-            <input
-              className={inputClass}
+            <Input
               value={groupId}
               onChange={(e) => setGroupId(e.target.value.replace(/[^0-9-]/g, ''))}
               placeholder="-1001234567890"
@@ -151,12 +149,10 @@ export function SettingsView() {
             Синхронизировать
           </Button>
           <label className="flex items-center gap-2 text-sm text-slate-300">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={status?.enabled ?? false}
               disabled={busy || !status?.configured || !status?.group_id}
               onChange={(e) => save({ enabled: e.target.checked })}
-              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
             />
             Включить уведомления
           </label>
@@ -164,12 +160,10 @@ export function SettingsView() {
             className="flex items-center gap-2 text-sm text-slate-300"
             title="Включено: карточка в лог-чат на каждое сообщение, совпавшее с правилом, — даже если ответ не ушёл; итог (ответили / не удалось / не отправляли и почему) дописывается в ту же карточку. Выключено: как раньше — карточки только об отправленных ответах."
           >
-            <input
-              type="checkbox"
+            <Checkbox
               checked={status?.log_all_matches ?? true}
               disabled={busy || !status?.configured || !status?.group_id}
               onChange={(e) => save({ log_all_matches: e.target.checked })}
-              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
             />
             Присылать каждое совпадение правила
           </label>
@@ -260,16 +254,16 @@ function PersonaCard() {
 
       <div className="grid gap-4">
         <Field label="Характер / кто это" hint="Имя, возраст, привычки речи, что можно и нельзя">
-          <textarea
-            className={`${inputClass} min-h-32 resize-y`}
+          <Textarea
+            rows={6}
             value={character}
             onChange={(e) => setCharacter(e.target.value)}
             placeholder={'например: Настя, 26 лет, живая и дружелюбная, пишет с маленькой буквы, без официоза, короткими фразами…'}
           />
         </Field>
         <Field label="Примеры переписки (история)" hint="Реальные фразы этого человека — по одной на строку. Задают тон">
-          <textarea
-            className={`${inputClass} min-h-40 resize-y`}
+          <Textarea
+            rows={8}
             value={examples}
             onChange={(e) => setExamples(e.target.value)}
             placeholder={'привет) да я как раз недавно так же искала\nне, это вообще не сложно, сейчас скину\nой, у меня то же самое было, помогло вот что…'}
@@ -282,12 +276,10 @@ function PersonaCard() {
           {busy ? 'Сохраняем…' : 'Сохранить'}
         </Button>
         <label className="flex items-center gap-2 text-sm text-slate-300">
-          <input
-            type="checkbox"
+          <Checkbox
             checked={enabled}
             disabled={busy}
             onChange={(e) => save({ enabled: e.target.checked })}
-            className="h-4 w-4 rounded border-ink-600 bg-ink-950"
           />
           Включить личность
         </label>
@@ -297,7 +289,7 @@ function PersonaCard() {
       </div>
 
       <div className="mt-6 border-t border-ink-800 pt-5">
-        <h3 className="mb-1 text-sm font-semibold text-slate-200">Общие правила и длина ответа</h3>
+        <Heading level={3} className="mb-1">Общие правила и длина ответа</Heading>
         <p className="mb-4 text-sm text-slate-400">
           Действуют <b>в целом</b>, поверх всех сценариев и <b>всегда</b> — даже если личность
           выключена. Базовый промпт заменяет стандартные правила ответа; длина применяется, если у
@@ -308,8 +300,8 @@ function PersonaCard() {
             label="Базовый промпт (стиль и правила для всех ответов)"
             hint="Пусто — используются стандартные зашитые правила"
           >
-            <textarea
-              className={`${inputClass} min-h-40 resize-y`}
+            <Textarea
+              rows={8}
               value={baseRules}
               onChange={(e) => setBaseRules(e.target.value)}
               placeholder={
@@ -321,8 +313,7 @@ function PersonaCard() {
             label="Максимальная длина ответа (в целом)"
             hint="Символов; пусто или 0 — без общего ограничения"
           >
-            <input
-              className={inputClass}
+            <Input
               value={maxLen}
               onChange={(e) => setMaxLen(e.target.value.replace(/\D/g, ''))}
               placeholder="например 300"

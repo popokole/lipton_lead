@@ -1,16 +1,9 @@
 'use client';
 
+import { Bot, FlaskConical, Infinity as InfinityIcon, Repeat, Timer } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
-import {
-  Badge,
-  Button,
-  ChatAvatar,
-  Empty,
-  ErrorText,
-  PageHeader,
-  inputClass,
-} from '@/components/ui';
+import { Badge, Button, ChatAvatar, Empty, ErrorText, PageHeader, RowButton, Segmented, Textarea, Tile, ToggleChip } from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 import { useApi } from '@/lib/hooks';
 import type { Message, Thread } from '@/lib/types';
@@ -62,29 +55,21 @@ export function InboxView() {
         subtitle="Личные диалоги и группы — раздельно. Переписка и ручной ответ от имени аккаунта"
       />
 
-      <div className="mb-4 inline-flex rounded-lg border border-ink-800 bg-ink-900/40 p-1 text-sm">
-        <button
-          onClick={() => setKind('dm')}
-          className={`rounded-md px-4 py-1.5 transition ${
-            kind === 'dm' ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          Личка
-        </button>
-        <button
-          onClick={() => setKind('group')}
-          className={`rounded-md px-4 py-1.5 transition ${
-            kind === 'group' ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          Группы
-        </button>
+      <div className="mb-4">
+        <Segmented<Kind>
+          value={kind}
+          onChange={setKind}
+          options={[
+            ['dm', 'Личка'],
+            ['group', 'Группы'],
+          ]}
+        />
       </div>
 
       <ErrorText>{threads.error}</ErrorText>
 
       <div className="grid gap-4 lg:grid-cols-[340px_1fr]">
-        <div className="max-h-[70vh] overflow-y-auto rounded-xl border border-ink-800 bg-ink-900/40">
+        <Tile className="max-h-[70vh] overflow-y-auto">
           {(threads.data?.length ?? 0) === 0 ? (
             <div className="p-4">
               <Empty>
@@ -97,12 +82,7 @@ export function InboxView() {
                 const on = thread.chat_id === selected;
                 return (
                   <li key={thread.chat_id}>
-                    <button
-                      onClick={() => setSelected(thread.chat_id)}
-                      className={`flex w-full items-center gap-3 px-3 py-3 text-left transition ${
-                        on ? 'bg-accent-soft' : 'hover:bg-ink-800/60'
-                      }`}
-                    >
+                    <RowButton selected={on} onClick={() => setSelected(thread.chat_id)} className="px-3 py-3">
                       <ChatAvatar
                         chatId={thread.chat_id}
                         title={threadName(thread)}
@@ -125,20 +105,20 @@ export function InboxView() {
                           {thread.last_text ?? '—'}
                         </div>
                       </div>
-                    </button>
+                    </RowButton>
                   </li>
                 );
               })}
             </ul>
           )}
-        </div>
+        </Tile>
 
         {active ? (
           <ThreadView key={active.chat_id} thread={active} onSent={threads.reload} />
         ) : (
-          <div className="flex min-h-[40vh] items-center justify-center rounded-xl border border-ink-800 bg-ink-900/40">
+          <Tile className="flex min-h-[40vh] items-center justify-center">
             <Empty>Выберите чат слева</Empty>
-          </div>
+          </Tile>
         )}
       </div>
     </>
@@ -222,8 +202,8 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
   };
 
   return (
-    <div className="flex max-h-[70vh] flex-col rounded-xl border border-ink-800 bg-ink-900/40">
-      <div className="flex items-center justify-between gap-3 border-b border-ink-800 px-4 py-3">
+    <Tile className="flex max-h-[70vh] flex-col">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-ink-800 px-4 py-3">
         <div className="flex min-w-0 items-center gap-3">
           <ChatAvatar
             chatId={thread.chat_id}
@@ -238,58 +218,50 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {thread.kind === 'dm' && thread.lead_score != null && (
             <Badge tone="info">лид {thread.lead_score}</Badge>
           )}
-          <button
+          <ToggleChip
+            on={thread.test_mode}
+            tone="test"
             onClick={() => void toggleTestMode()}
+            icon={<FlaskConical size={14} />}
             title="Тест-чат: отвечаем всегда, без one_shot / лимита / рабочих часов"
-            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-              thread.test_mode
-                ? 'bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30'
-                : 'border border-ink-600 text-slate-400 hover:bg-ink-800'
-            }`}
           >
-            {thread.test_mode ? '🧪 тест-чат' : '🧪 тест'}
-          </button>
-          <button
+            {thread.test_mode ? 'Тест-чат' : 'Тест'}
+          </ToggleChip>
+          <ToggleChip
+            on={avoidRepeat}
+            tone="info"
             onClick={() => void toggleAvoidRepeat()}
+            icon={<Repeat size={14} />}
             title="Не повторять смысл недавних ответов ИИ в этом чате"
-            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-              avoidRepeat
-                ? 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
-                : 'border border-ink-600 text-slate-400 hover:bg-ink-800'
-            }`}
           >
-            {avoidRepeat ? '🔁 не повторяться' : '🔁 повторы ок'}
-          </button>
+            {avoidRepeat ? 'Не повторяться' : 'Повторы ок'}
+          </ToggleChip>
           {thread.kind === 'group' && (
-            <button
+            <ToggleChip
+              on={thread.ai_chat}
+              tone="ok"
               onClick={() => void toggleAiChat()}
               disabled={togglingAi}
+              icon={<Bot size={14} />}
               title="Бот отвечает в этой группе по решению ИИ (не на всё подряд)"
-              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition disabled:opacity-50 ${
-                thread.ai_chat
-                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                  : 'border border-ink-600 text-slate-400 hover:bg-ink-800'
-              }`}
             >
-              {togglingAi ? '…' : thread.ai_chat ? '● Общение ИИ включено' : '○ Включить общение ИИ'}
-            </button>
+              {togglingAi ? '…' : thread.ai_chat ? 'Общение ИИ включено' : 'Включить общение ИИ'}
+            </ToggleChip>
           )}
           {thread.kind === 'group' && (
-            <button
+            <ToggleChip
+              on={thread.cooldown_exempt}
+              tone="warn"
               onClick={() => void toggleCooldownExempt()}
+              icon={thread.cooldown_exempt ? <InfinityIcon size={14} /> : <Timer size={14} />}
               title="Без анти-бан лимита: в этот чат можно отвечать без задержки «раз в N минут»"
-              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
-                thread.cooldown_exempt
-                  ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
-                  : 'border border-ink-600 text-slate-400 hover:bg-ink-800'
-              }`}
             >
-              {thread.cooldown_exempt ? '∞ без лимита' : '⏱ лимит вкл'}
-            </button>
+              {thread.cooldown_exempt ? 'Без лимита' : 'Лимит вкл'}
+            </ToggleChip>
           )}
         </div>
       </div>
@@ -311,12 +283,12 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
                   }`}
                 >
                   {thread.kind === 'group' && message.is_incoming && message.sender_display_name && (
-                    <div className="mb-0.5 text-[11px] font-medium text-accent">
+                    <div className="mb-0.5 text-xs font-medium text-accent">
                       {message.sender_display_name}
                     </div>
                   )}
                   <div className="whitespace-pre-wrap break-words">{message.text ?? '—'}</div>
-                  <div className={`mt-1 text-[10px] ${mine ? 'text-white/60' : 'text-slate-500'}`}>
+                  <div className={`mt-1 text-xs tabular-nums ${mine ? 'text-white/70' : 'text-slate-500'}`}>
                     {new Date(message.date).toLocaleString('ru')}
                     {mine && message.is_bot_reply ? ' · ии' : ''}
                   </div>
@@ -331,7 +303,7 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
       <div className="border-t border-ink-800 px-4 py-3">
         {error && <div className="mb-2 text-xs text-rose-300">{error}</div>}
         <div className="flex items-end gap-2">
-          <textarea
+          <Textarea
             value={text}
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => {
@@ -342,13 +314,13 @@ function ThreadView({ thread, onSent }: { thread: Thread; onSent: () => void }) 
             }}
             rows={2}
             placeholder="Написать от имени аккаунта… (Ctrl+Enter — отправить)"
-            className={`${inputClass} resize-none`}
+            className="resize-none"
           />
           <Button onClick={() => void send()} disabled={sending || text.trim().length === 0}>
             {sending ? '…' : 'Отправить'}
           </Button>
         </div>
       </div>
-    </div>
+    </Tile>
   );
 }

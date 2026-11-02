@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 
-import { Badge, Button, Card, Empty, ErrorText, PageHeader, inputClass } from '@/components/ui';
+import { Badge, Button, Card, Empty, ErrorText, formatPercent, PageHeader, Quote, Textarea } from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 import { useApi } from '@/lib/hooks';
 
@@ -82,17 +82,17 @@ export function ReviewsView() {
               <div className="mb-2 flex items-center justify-between gap-2">
                 <span className="text-sm font-medium text-slate-200">{r.sender ?? 'собеседник'}</span>
                 {r.confidence != null && (
-                  <Badge tone="warn">уверенность {(r.confidence * 100).toFixed(0)}%</Badge>
+                  <Badge tone="warn">уверенность {formatPercent(r.confidence)}</Badge>
                 )}
               </div>
               {r.incoming_text && (
-                <div className="mb-3 rounded-lg border border-ink-800 bg-ink-900/40 px-3 py-2 text-xs text-slate-400">
-                  <span className="text-slate-500">сообщение: </span>
+                <Quote className="mb-3">
+                  <span className="text-slate-500">Сообщение: </span>
                   {r.incoming_text}
-                </div>
+                </Quote>
               )}
-              <textarea
-                className={`${inputClass} h-24 w-full resize-y`}
+              <Textarea
+                rows={4}
                 value={drafts[r.id] ?? ''}
                 onChange={(e) => setDrafts((p) => ({ ...p, [r.id]: e.target.value }))}
               />

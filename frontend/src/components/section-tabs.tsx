@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 
+import { TabBar } from '@/components/ui';
+
 export interface TabDef {
   key: string;
   label: string;
@@ -39,30 +41,11 @@ export function SectionTabs({ id, tabs }: { id: string; tabs: TabDef[] }) {
 
   return (
     <div>
-      <div className="mb-6 flex flex-wrap gap-1 border-b border-ink-700">
-        {tabs.map((tab) => {
-          const isActive = tab.key === current?.key;
-          return (
-            <button
-              key={tab.key}
-              type="button"
-              onClick={() => select(tab.key)}
-              className={`-mb-px flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-                isActive
-                  ? 'border-accent text-slate-100'
-                  : 'border-transparent text-slate-500 hover:text-slate-300'
-              }`}
-            >
-              {tab.label}
-              {tab.badge ? (
-                <span className="rounded-full bg-rose-500/20 px-1.5 text-xs font-semibold text-rose-300">
-                  {tab.badge}
-                </span>
-              ) : null}
-            </button>
-          );
-        })}
-      </div>
+      <TabBar
+        tabs={tabs.map(({ key, label, badge }) => ({ key, label, badge }))}
+        value={current?.key ?? ''}
+        onChange={select}
+      />
       {current?.element}
     </div>
   );

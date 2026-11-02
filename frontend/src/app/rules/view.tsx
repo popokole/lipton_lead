@@ -1,18 +1,9 @@
 'use client';
 
+import { Pin } from 'lucide-react';
 import { useState } from 'react';
 
-import {
-  Badge,
-  Button,
-  Card,
-  Empty,
-  ErrorText,
-  Field,
-  PageHeader,
-  Table,
-  inputClass,
-} from '@/components/ui';
+import { Badge, Button, Card, Checkbox, Empty, ErrorText, Field, Input, PageHeader, Select, Table } from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 import { useApi } from '@/lib/hooks';
 import type { Account, ActionType, Rule, Scenario } from '@/lib/types';
@@ -120,42 +111,38 @@ export function RulesView() {
       <Card title="Новое правило" className="mb-6">
         <div className="grid gap-4 lg:grid-cols-3">
           <Field label="Название">
-            <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} />
+            <Input value={name} onChange={(e) => setName(e.target.value)} />
           </Field>
           <Field label="Ключевые слова" hint="Через запятую, с новой строки или через *">
-            <input className={inputClass} value={terms} onChange={(e) => setTerms(e.target.value)} />
+            <Input value={terms} onChange={(e) => setTerms(e.target.value)} />
           </Field>
           <Field label="Исключения" hint="Сообщение с этими словами пропускается">
-            <input
-              className={inputClass}
+            <Input
               value={exclude}
               onChange={(e) => setExclude(e.target.value)}
             />
           </Field>
           <Field label="Где применять" hint="Личные сообщения и чаты обрабатываются разными конвейерами">
-            <select
-              className={inputClass}
+            <Select
               value={scope}
               onChange={(e) => setScope(e.target.value as 'CHAT_MONITOR' | 'DIALOG' | 'ALL')}
             >
               <option value="ALL">везде (личка + чаты)</option>
               <option value="CHAT_MONITOR">только в отслеживаемых чатах</option>
               <option value="DIALOG">только в личных сообщениях</option>
-            </select>
+            </Select>
           </Field>
           <Field
             label="Аккаунты"
             hint="Пусто — правило работает на всех. Иначе только на выбранных"
           >
-            <div className="space-y-1 rounded-lg border border-ink-600 bg-ink-950 p-2">
+            <div className="space-y-1 rounded-lg border border-ink-600 p-2">
               {(accounts.data?.length ?? 0) === 0 && (
                 <span className="text-xs text-slate-600">Нет аккаунтов</span>
               )}
               {accounts.data?.map((account) => (
                 <label key={account.id} className="flex items-center gap-2 text-sm text-slate-300">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 rounded border-ink-600 bg-ink-950"
+                  <Checkbox
                     checked={accountIds.includes(account.id)}
                     onChange={(e) =>
                       setAccountIds((prev) =>
@@ -174,8 +161,7 @@ export function RulesView() {
             </div>
           </Field>
           <Field label="Сценарий">
-            <select
-              className={inputClass}
+            <Select
               value={scenarioId}
               onChange={(e) => setScenarioId(e.target.value)}
             >
@@ -185,11 +171,10 @@ export function RulesView() {
                   {scenario.name}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
           <Field label="Действие">
-            <select
-              className={inputClass}
+            <Select
               value={action}
               onChange={(e) => setAction(e.target.value as ActionType)}
             >
@@ -198,48 +183,37 @@ export function RulesView() {
                   {item}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
           <Field label="Приоритет" hint="Больше — раньше проверяется">
-            <input
-              className={inputClass}
+            <Input
               value={priority}
               onChange={(e) => setPriority(e.target.value.replace(/\D/g, ''))}
             />
           </Field>
           <Field label="Пауза на пользователя" hint="Секунд между ответами одному человеку">
-            <input
-              className={inputClass}
+            <Input
               value={cooldown}
               onChange={(e) => setCooldown(e.target.value.replace(/\D/g, ''))}
             />
           </Field>
           <Field label="Порог уверенности AI" hint="0…1, применяется при включённой проверке">
-            <input
-              className={inputClass}
+            <Input
               value={threshold}
               onChange={(e) => setThreshold(e.target.value)}
               disabled={!aiEnabled}
             />
           </Field>
-          <label className="flex items-end gap-2 pb-2 text-sm text-slate-400">
-            <input
-              type="checkbox"
+          <Checkbox className="self-end pb-2"
               checked={aiEnabled}
-              onChange={(e) => setAiEnabled(e.target.checked)}
-              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
-            />
+              onChange={(e) => setAiEnabled(e.target.checked)}>
             Проверять сообщение через AI
-          </label>
-          <label className="flex items-end gap-2 pb-2 text-sm text-slate-400">
-            <input
-              type="checkbox"
+          </Checkbox>
+          <Checkbox className="self-end pb-2"
               checked={notifyTopicEnabled}
-              onChange={(e) => setNotifyTopicEnabled(e.target.checked)}
-              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
-            />
+              onChange={(e) => setNotifyTopicEnabled(e.target.checked)}>
             Свой топик в уведомлениях (иначе — общий «Общение ИИ»)
-          </label>
+          </Checkbox>
         </div>
         <div className="mt-4">
           <Button onClick={create} disabled={busy || !name.trim()}>
@@ -294,7 +268,8 @@ export function RulesView() {
                       onClick={() => toggleTopic(rule)}
                       title="Свой топик в форум-группе уведомлений вместо общего «Общение ИИ»"
                     >
-                      {rule.notify_topic_enabled ? '📌 топик свой' : '📌 топик общий'}
+                      <Pin size={14} />
+                      {rule.notify_topic_enabled ? 'Топик свой' : 'Топик общий'}
                     </Button>
                     <Button variant="danger" onClick={() => remove(rule)}>
                       Удалить

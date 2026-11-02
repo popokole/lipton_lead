@@ -5,7 +5,7 @@ import {
   MessageSquare,
   Server,
   ShieldAlert,
-  Sparkles,
+  SlidersHorizontal,
   Target,
 } from 'lucide-react';
 import Link from 'next/link';
@@ -58,7 +58,7 @@ const TILES: TileDef[] = [
     href: '/ai',
     label: 'Настройка ИИ',
     description: 'Сценарии, правила, база знаний',
-    icon: Sparkles,
+    icon: SlidersHorizontal,
     stat: (c) => `${c?.ai_analyzed_today ?? 0} обращений к AI`,
     points: (s) => s?.matches ?? [],
     color: '#eab308',
@@ -95,7 +95,7 @@ export default function HomePage() {
           const Icon = tile.icon;
           return (
             <Link key={tile.href} href={tile.href} className="block">
-              <Card className="h-full transition hover:border-accent/50">
+              <Card className="h-full" interactive>
                 <div className="flex items-center gap-3">
                   <div className="rounded-lg bg-ink-800 p-2 text-accent">
                     <Icon size={20} />

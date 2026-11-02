@@ -2,18 +2,7 @@
 
 import { useState } from 'react';
 
-import {
-  Badge,
-  Button,
-  Card,
-  ChatAvatar,
-  Empty,
-  ErrorText,
-  PageHeader,
-  Table,
-  inputClass,
-  statusTone,
-} from '@/components/ui';
+import { Badge, Button, Card, ChatAvatar, Checkbox, Empty, ErrorText, Input, PageHeader, statusTone, Table } from '@/components/ui';
 import { useApi, useRealtime } from '@/lib/hooks';
 import type { ActionRow, Message, Page } from '@/lib/types';
 
@@ -58,18 +47,16 @@ export function MessagesView() {
 
       <Card className="mb-6">
         <div className="flex flex-wrap items-center gap-3">
-          <input
-            className={`${inputClass} max-w-xs`}
+          <Input
+            className="max-w-xs"
             placeholder="Поиск по тексту"
             value={search}
             onChange={(event) => changeSearch(event.target.value)}
           />
           <label className="flex items-center gap-2 text-sm text-slate-400">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={matchedOnly}
               onChange={(event) => changeMatched(event.target.checked)}
-              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
             />
             только совпавшие с правилом
           </label>

@@ -1,19 +1,9 @@
 'use client';
 
+import { X } from 'lucide-react';
 import { useState } from 'react';
 
-import {
-  Badge,
-  Button,
-  Card,
-  Empty,
-  ErrorText,
-  Field,
-  PageHeader,
-  Table,
-  inputClass,
-  statusTone,
-} from '@/components/ui';
+import { Badge, Button, Card, Empty, ErrorText, Field, FileInput, Heading, IconButton, Input, PageHeader, Select, statusTone, Table, Tile } from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 import { useApi } from '@/lib/hooks';
 import type { Account, Chat, Dialog, Proxy, TDataAccount } from '@/lib/types';
@@ -97,8 +87,7 @@ export function AccountsView() {
         <div className="flex flex-wrap items-end gap-3">
           <div className="w-72">
             <Field label="Название" hint="Только для панели, в Telegram не видно">
-              <input
-                className={inputClass}
+              <Input
                 value={label}
                 onChange={(event) => setLabel(event.target.value)}
                 placeholder="Основной аккаунт"
@@ -141,8 +130,8 @@ export function AccountsView() {
                   {!account.enabled && <span className="ml-2 text-xs text-slate-600">выключен</span>}
                 </td>
                 <td className="py-3 pr-4">
-                  <select
-                    className="rounded-lg border border-ink-600 bg-ink-950 px-2 py-1 text-xs text-slate-300"
+                  <Select
+                    size="sm"
                     value={account.proxy_id ?? ''}
                     onChange={(event) => setProxy(account, event.target.value)}
                   >
@@ -152,7 +141,7 @@ export function AccountsView() {
                         {proxy.name}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                 </td>
                 <td className="max-w-[220px] truncate py-3 pr-4 text-xs text-rose-300/80">
                   {account.last_error ?? ''}
@@ -214,15 +203,15 @@ export function AccountsView() {
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-ink-700 bg-ink-900">
-        <header className="flex items-center justify-between border-b border-ink-700 px-5 py-3">
-          <h2 className="text-sm font-medium text-slate-200">{title}</h2>
-          <button onClick={onClose} className="text-slate-500 hover:text-slate-300">
-            ✕
-          </button>
+      <Tile className="max-h-[85vh] w-full max-w-2xl overflow-y-auto">
+        <header className="flex items-center justify-between border-b border-ink-700 py-2 pl-5 pr-2">
+          <Heading level={2}>{title}</Heading>
+          <IconButton label="Закрыть" onClick={onClose}>
+            <X size={16} />
+          </IconButton>
         </header>
         <div className="p-5">{children}</div>
-      </div>
+      </Tile>
     </div>
   );
 }
@@ -259,8 +248,7 @@ function AuthWizard({ account, onClose }: { account: Account; onClose: () => voi
               переменных окружения, поля можно оставить пустыми.
             </p>
             <Field label="Телефон" hint="В международном формате, например +79991234567">
-              <input
-                className={inputClass}
+              <Input
                 value={phone}
                 onChange={(event) => setPhone(event.target.value)}
                 placeholder="+7…"
@@ -268,10 +256,10 @@ function AuthWizard({ account, onClose }: { account: Account; onClose: () => voi
             </Field>
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label="api_id (необязательно)">
-                <input className={inputClass} value={apiId} onChange={(e) => setApiId(e.target.value)} />
+                <Input value={apiId} onChange={(e) => setApiId(e.target.value)} />
               </Field>
               <Field label="api_hash (необязательно)">
-                <input className={inputClass} value={apiHash} onChange={(e) => setApiHash(e.target.value)} />
+                <Input value={apiHash} onChange={(e) => setApiHash(e.target.value)} />
               </Field>
             </div>
             <ErrorText>{error}</ErrorText>
@@ -301,7 +289,7 @@ function AuthWizard({ account, onClose }: { account: Account; onClose: () => voi
           <>
             <p className="text-sm text-slate-400">Код пришёл в Telegram на этот номер.</p>
             <Field label="Код подтверждения">
-              <input className={inputClass} value={code} onChange={(e) => setCode(e.target.value)} />
+              <Input value={code} onChange={(e) => setCode(e.target.value)} />
             </Field>
             <ErrorText>{error}</ErrorText>
             <Button
@@ -328,8 +316,7 @@ function AuthWizard({ account, onClose }: { account: Account; onClose: () => voi
               У аккаунта включена двухфакторная защита — нужен облачный пароль.
             </p>
             <Field label="Пароль 2FA">
-              <input
-                className={inputClass}
+              <Input
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -492,18 +479,14 @@ function TDataImport({ account, onClose }: { account: Account; onClose: () => vo
         </p>
 
         <Field label="Папка tdata или архив">
-          <input
-            type="file"
+          <FileInput
             multiple
-            // @ts-expect-error нестандартные атрибуты выбора папки
-            webkitdirectory=""
-            directory=""
+            directory
             onChange={(event) => {
               setFiles(event.target.files);
               setFound(null);
               setDone(false);
             }}
-            className="block w-full text-sm text-slate-400 file:mr-3 file:rounded-lg file:border-0 file:bg-ink-700 file:px-3 file:py-1.5 file:text-sm file:text-slate-200"
           />
         </Field>
 
@@ -515,8 +498,7 @@ function TDataImport({ account, onClose }: { account: Account; onClose: () => vo
 
         {found && found.length > 0 && !done && (
           <Field label="Аккаунт внутри tdata">
-            <select
-              className={inputClass}
+            <Select
               value={chosen ?? ''}
               onChange={(event) => setChosen(Number(event.target.value))}
             >
@@ -525,7 +507,7 @@ function TDataImport({ account, onClose }: { account: Account; onClose: () => vo
                   #{item.index} · Telegram ID {item.tg_user_id} · DC {item.dc_id}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
         )}
 
@@ -602,27 +584,26 @@ function ProxyCard({
       <div className="flex flex-wrap items-end gap-3">
         <div className="w-40">
           <Field label="Название">
-            <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} />
+            <Input value={name} onChange={(e) => setName(e.target.value)} />
           </Field>
         </div>
         <div className="w-28">
           <Field label="Тип">
-            <select className={inputClass} value={scheme} onChange={(e) => setScheme(e.target.value)}>
+            <Select value={scheme} onChange={(e) => setScheme(e.target.value)}>
               <option value="socks5">socks5</option>
               <option value="socks4">socks4</option>
               <option value="http">http</option>
-            </select>
+            </Select>
           </Field>
         </div>
         <div className="w-56">
           <Field label="Хост">
-            <input className={inputClass} value={host} onChange={(e) => setHost(e.target.value)} />
+            <Input value={host} onChange={(e) => setHost(e.target.value)} />
           </Field>
         </div>
         <div className="w-24">
           <Field label="Порт">
-            <input
-              className={inputClass}
+            <Input
               value={port}
               onChange={(e) => setPort(e.target.value.replace(/\D/g, ''))}
             />

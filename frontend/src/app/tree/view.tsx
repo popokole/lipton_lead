@@ -2,20 +2,10 @@
 
 import Link from 'next/link';
 
-import { Filter, Search, Target } from 'lucide-react';
+import { Eye, EyeOff, Filter, Search, Target } from 'lucide-react';
 import { useMemo, useRef, useState } from 'react';
 
-import {
-  Badge,
-  Button,
-  Card,
-  ChatAvatar,
-  Empty,
-  ErrorText,
-  PageHeader,
-  Stat,
-  inputClass,
-} from '@/components/ui';
+import { Badge, Button, Card, ChatAvatar, Empty, ErrorText, Heading, Input, PageHeader, RowButton, Segmented, Stat, Tile, ToggleChip } from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 import { useApi } from '@/lib/hooks';
 import type { ChatNode, ChatTreeAccount } from '@/lib/types';
@@ -99,21 +89,17 @@ export function TreeView() {
 
       <Card className="mb-4">
         <div className="flex flex-wrap items-center gap-3">
-          <div className="relative min-w-[200px] flex-1">
-            <Search
-              size={15}
-              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-500"
-            />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Поиск по названию или @нику"
-              className={`${inputClass} pl-9`}
-            />
-          </div>
-          <Seg
+          <Input
+            icon={<Search size={16} />}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Поиск по названию или @нику"
+            className="min-w-48 flex-1"
+          />
+          <Segmented<TypeFilter>
+            size="sm"
             value={type}
-            onChange={(v) => setType(v as TypeFilter)}
+            onChange={setType}
             options={[
               ['all', 'Все'],
               ['dm', 'Личка'],
@@ -121,25 +107,30 @@ export function TreeView() {
               ['channel', 'Каналы'],
             ]}
           />
-          <button
+          <ToggleChip
+            on={leadsOnly}
+            tone="ok"
             onClick={() => setLeadsOnly((v) => !v)}
-            className={toggleClass(leadsOnly, 'ok')}
+            icon={<Target size={14} />}
             title="Показать только чаты, где есть лиды"
           >
-            <Target size={13} /> с лидами
-          </button>
-          <button
+            С лидами
+          </ToggleChip>
+          <ToggleChip
+            on={monitoredOnly}
+            tone="info"
             onClick={() => setMonitoredOnly((v) => !v)}
-            className={toggleClass(monitoredOnly, 'info')}
+            icon={<Filter size={14} />}
             title="Показать только чаты со включённой слежкой"
           >
-            <Filter size={13} /> отслеживаемые
-          </button>
+            Отслеживаемые
+          </ToggleChip>
           <div className="ml-auto flex items-center gap-2 text-xs text-slate-500">
-            <span>сортировка</span>
-            <Seg
+            <span>Сортировка</span>
+            <Segmented<SortKey>
+              size="sm"
               value={sort}
-              onChange={(v) => setSort(v as SortKey)}
+              onChange={setSort}
               options={[
                 ['leads', 'Лиды'],
                 ['activity', 'Активность'],
@@ -172,10 +163,8 @@ export function TreeView() {
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
           onClick={() => setSelected(null)}
         >
-          <div
-            className="w-full max-w-md rounded-2xl border border-ink-700 bg-ink-900 p-5"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+            <Tile className="p-5">
             <div className="mb-4 flex items-center gap-3">
               <ChatAvatar
                 chatId={selected.chat.id}
@@ -184,9 +173,9 @@ export function TreeView() {
                 size={44}
               />
               <div className="min-w-0">
-                <h3 className="truncate text-sm font-medium text-slate-100">
+                <Heading level={3} className="truncate">
                   {chatName(selected.chat)}
-                </h3>
+                </Heading>
                 <p className="text-xs text-slate-500">
                   {KIND_LABEL[kindOf(selected.chat.type)]} · {selected.account}
                 </p>
@@ -222,6 +211,7 @@ export function TreeView() {
                 <Button variant="ghost">Открыть в «Общении»</Button>
               </Link>
             </div>
+            </Tile>
           </div>
         </div>
       )}
@@ -251,13 +241,13 @@ function AccountChats({
   busy: boolean;
 }) {
   const rows = useMemo(() => {
-    const q = filters.query.trim().toLowerCase();
+    const q = filters.query.trim().toLocaleLowerCase('ru');
     let list = account.chats.filter((c) => {
       if (filters.type !== 'all' && kindOf(c.type) !== filters.type) return false;
       if (filters.leadsOnly && c.leads_count === 0) return false;
       if (filters.monitoredOnly && !c.monitored) return false;
       if (q) {
-        const hay = `${c.title ?? ''} ${c.username ?? ''} ${c.tg_chat_id}`.toLowerCase();
+        const hay = `${c.title ?? ''} ${c.username ?? ''} ${c.tg_chat_id}`.toLocaleLowerCase('ru');
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -288,15 +278,8 @@ function AccountChats({
         <ul className="divide-y divide-ink-800/70">
           {rows.map((chat) => (
             <li key={chat.id}>
-              <div
-                className={`flex items-center gap-3 py-2.5 ${
-                  chat.leads_count > 0 ? 'pl-3 -ml-3 border-l-2 border-emerald-500/60' : ''
-                }`}
-              >
-                <button
-                  onClick={() => onSelect(chat)}
-                  className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                >
+              <div className="flex items-center gap-3 py-1">
+                <RowButton onClick={() => onSelect(chat)} className="flex-1 rounded-lg px-2 py-1.5">
                   <ChatAvatar
                     chatId={chat.id}
                     title={chat.title}
@@ -310,7 +293,7 @@ function AccountChats({
                       >
                         {chatName(chat)}
                       </span>
-                      <span className="shrink-0 text-[10px] uppercase tracking-wide text-slate-600">
+                      <span className="shrink-0 text-xs text-slate-500">
                         {KIND_LABEL[kindOf(chat.type)]}
                       </span>
                     </div>
@@ -323,23 +306,21 @@ function AccountChats({
                       )}
                     </div>
                   </div>
-                </button>
-                <button
+                </RowButton>
+                <ToggleChip
+                  on={chat.monitored}
+                  tone="info"
                   onClick={() => onToggleMonitor(chat)}
                   disabled={busy}
+                  icon={chat.monitored ? <Eye size={14} /> : <EyeOff size={14} />}
                   title={
                     chat.monitored
                       ? 'Слежка включена — правила работают. Нажмите, чтобы выключить'
                       : 'Слежка выключена. Нажмите, чтобы включить'
                   }
-                  className={`shrink-0 rounded-lg border px-2.5 py-1 text-xs font-medium transition disabled:opacity-40 ${
-                    chat.monitored
-                      ? 'border-sky-500/30 bg-sky-500/15 text-sky-300'
-                      : 'border-ink-600 text-slate-400 hover:bg-ink-800'
-                  }`}
                 >
-                  {chat.monitored ? '● слежка' : '○ слежка'}
-                </button>
+                  Слежка
+                </ToggleChip>
               </div>
             </li>
           ))}
@@ -429,17 +410,19 @@ function RadialGraph({
         <span className="mr-auto">
           Аккаунт в центре, линии к чатам. Зелёные — есть лиды. Колесо — зум, тяни — двигать
         </span>
-        <button onClick={() => setLeadsOnly((v) => !v)} className={toggleClass(leadsOnly, 'ok')}>
-          <Target size={13} /> только с лидами
-        </button>
-        <button
-          onClick={() => setView({ k: 1, x: 0, y: 0 })}
-          className="rounded-lg border border-ink-600 px-2.5 py-1.5 text-xs text-slate-400 hover:bg-ink-800"
+        <ToggleChip
+          on={leadsOnly}
+          tone="ok"
+          onClick={() => setLeadsOnly((v) => !v)}
+          icon={<Target size={14} />}
         >
-          сбросить вид
-        </button>
+          Только с лидами
+        </ToggleChip>
+        <Button variant="ghost" size="sm" onClick={() => setView({ k: 1, x: 0, y: 0 })}>
+          Сбросить вид
+        </Button>
       </div>
-      <div className="overflow-hidden rounded-xl border border-ink-800 bg-ink-950">
+      <div className="overflow-hidden rounded-xl border border-ink-700">
         <svg
           ref={svgRef}
           viewBox={`0 0 ${SIZE} ${SIZE}`}
@@ -545,40 +528,4 @@ function RadialGraph({
       </div>
     </Card>
   );
-}
-
-function Seg({
-  value,
-  onChange,
-  options,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  options: [string, string][];
-}) {
-  return (
-    <div className="inline-flex rounded-lg border border-ink-700 bg-ink-950 p-0.5 text-xs">
-      {options.map(([v, label]) => (
-        <button
-          key={v}
-          onClick={() => onChange(v)}
-          className={`rounded-md px-2.5 py-1 transition ${
-            value === v ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          {label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function toggleClass(active: boolean, tone: 'ok' | 'info'): string {
-  const on =
-    tone === 'ok'
-      ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-300'
-      : 'border-sky-500/30 bg-sky-500/15 text-sky-300';
-  return `inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
-    active ? on : 'border-ink-600 text-slate-400 hover:bg-ink-800'
-  }`;
 }

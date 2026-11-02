@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 
-import { Badge, Button, Card, Empty, ErrorText, PageHeader, Table, inputClass , ChatAvatar} from '@/components/ui';
+import { Badge, Button, Card, ChatAvatar, Empty, ErrorText, PageHeader, Select, Table } from '@/components/ui';
 import { useApi } from '@/lib/hooks';
 import type { LogRow, Page } from '@/lib/types';
 
@@ -45,8 +45,8 @@ export function LogsView() {
 
       <Card className="mb-6">
         <div className="flex flex-wrap items-center gap-3">
-          <select
-            className={`${inputClass} max-w-xs`}
+          <Select
+            className="max-w-xs"
             value={eventType}
             onChange={(event) => changeType(event.target.value)}
           >
@@ -55,7 +55,7 @@ export function LogsView() {
                 {type || 'все события'}
               </option>
             ))}
-          </select>
+          </Select>
           <Button variant="ghost" onClick={() => void logs.reload()}>
             Обновить
           </Button>
@@ -98,7 +98,7 @@ export function LogsView() {
                   {row.chat_id ? (
                     <div className="flex items-center gap-2">
                       <ChatAvatar chatId={row.chat_id} title={row.chat_title} hasAvatar={row.chat_has_avatar} size={22} />
-                      <span className="max-w-[130px] truncate text-xs text-slate-400">{row.chat_title ?? (row.chat_username ? `@${row.chat_username}` : '—')}</span>
+                      <span className="max-w-32 truncate text-xs text-slate-400">{row.chat_title ?? (row.chat_username ? `@${row.chat_username}` : '—')}</span>
                     </div>
                   ) : (
                     <span className="text-xs text-slate-600">—</span>

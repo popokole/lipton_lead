@@ -2,17 +2,7 @@
 
 import { useState } from 'react';
 
-import {
-  Badge,
-  Button,
-  Card,
-  Empty,
-  ErrorText,
-  Field,
-  PageHeader,
-  Table,
-  inputClass,
-} from '@/components/ui';
+import { Badge, Button, Card, Empty, ErrorText, Field, Input, PageHeader, Select, Table } from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 import { useApi } from '@/lib/hooks';
 import type { Account, Chat } from '@/lib/types';
@@ -87,8 +77,7 @@ export function ChatsView() {
         <div className="flex flex-wrap items-end gap-3">
           <div className="w-56">
             <Field label="Аккаунт">
-              <select
-                className={inputClass}
+              <Select
                 value={accountId}
                 onChange={(event) => setAccountId(event.target.value)}
               >
@@ -97,13 +86,12 @@ export function ChatsView() {
                     {account.label}
                   </option>
                 ))}
-              </select>
+              </Select>
             </Field>
           </div>
           <div className="w-52">
             <Field label="ID чата">
-              <input
-                className={inputClass}
+              <Input
                 value={chatId}
                 onChange={(event) => setChatId(event.target.value.replace(/[^0-9-]/g, ''))}
                 placeholder="-1001192249190"
@@ -112,8 +100,7 @@ export function ChatsView() {
           </div>
           <div className="w-56">
             <Field label="Название" hint="Необязательно, для панели">
-              <input
-                className={inputClass}
+              <Input
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
               />

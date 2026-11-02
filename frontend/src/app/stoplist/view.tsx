@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 
-import { Button, Card, Empty, ErrorText, Field, PageHeader, Table, inputClass } from '@/components/ui';
+import { Button, Card, Empty, ErrorText, Field, Input, PageHeader, Table } from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 import { useApi } from '@/lib/hooks';
 
@@ -64,16 +64,14 @@ export function StoplistView() {
       <Card title="Добавить" className="mb-6">
         <div className="flex flex-wrap items-end gap-3">
           <Field label="tg-id или @username" hint="Цифры — это id, иначе ник">
-            <input
-              className={inputClass}
+            <Input
               value={ident}
               onChange={(e) => setIdent(e.target.value)}
               placeholder="@spammer или 123456789"
             />
           </Field>
           <Field label="Заметка" hint="Необязательно">
-            <input
-              className={inputClass}
+            <Input
               value={note}
               onChange={(e) => setNote(e.target.value)}
               placeholder="конкурент / бот / спам"

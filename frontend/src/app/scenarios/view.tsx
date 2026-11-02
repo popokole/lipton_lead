@@ -2,17 +2,7 @@
 
 import { useState } from 'react';
 
-import {
-  Badge,
-  Button,
-  Card,
-  Empty,
-  ErrorText,
-  Field,
-  PageHeader,
-  Table,
-  inputClass,
-} from '@/components/ui';
+import { Badge, Button, Card, Checkbox, Empty, ErrorText, Field, Input, PageHeader, Select, Table, Textarea } from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 import { useApi } from '@/lib/hooks';
 import type { Scenario } from '@/lib/types';
@@ -33,6 +23,7 @@ export function ScenariosView() {
   const [grounding, setGrounding] = useState(false);
   const [handoff, setHandoff] = useState(false);
   const [replyInDm, setReplyInDm] = useState(false);
+  // ai-design-check-ignore-next-line icons-not-emoji -- текст сообщения, которое бот пишет в группе, а не иконка интерфейса
   const [groupAck, setGroupAck] = useState('Отправлю в лс 🙂');
   const [leadCriteria, setLeadCriteria] = useState('');
   const [reviewUncertain, setReviewUncertain] = useState(false);
@@ -55,6 +46,7 @@ export function ScenariosView() {
     setGrounding(false);
     setHandoff(false);
     setReplyInDm(false);
+    // ai-design-check-ignore-next-line icons-not-emoji -- текст сообщения, которое бот пишет в группе, а не иконка интерфейса
     setGroupAck('Отправлю в лс 🙂');
     setLeadCriteria('');
     setReviewUncertain(false);
@@ -161,19 +153,18 @@ export function ScenariosView() {
       <Card title={editingId ? 'Изменить сценарий' : 'Новый сценарий'} className="mb-6">
         <div className="grid gap-4 lg:grid-cols-2">
           <Field label="Название">
-            <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} />
+            <Input value={name} onChange={(e) => setName(e.target.value)} />
           </Field>
           <Field label="Максимальная длина ответа" hint="Символов; пусто — без ограничения">
-            <input
-              className={inputClass}
+            <Input
               value={maxLength}
               onChange={(e) => setMaxLength(e.target.value.replace(/\D/g, ''))}
             />
           </Field>
           <div className="lg:col-span-2">
             <Field label="Системный промпт">
-              <textarea
-                className={`${inputClass} h-28 resize-y`}
+              <Textarea
+                rows={5}
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
               />
@@ -187,8 +178,7 @@ export function ScenariosView() {
               <div className="space-y-2">
                 {fallbacks.map((text, index) => (
                   <div key={index} className="flex gap-2">
-                    <input
-                      className={inputClass}
+                    <Input
                       value={text}
                       onChange={(e) =>
                         setFallbacks((prev) => prev.map((t, i) => (i === index ? e.target.value : t)))
@@ -209,55 +199,38 @@ export function ScenariosView() {
             </Field>
           </div>
           <Field label="База знаний" hint="ИИ будет отвечать по её материалам (цены, FAQ). Пусто — без базы">
-            <select className={inputClass} value={kbId} onChange={(e) => setKbId(e.target.value)}>
+            <Select value={kbId} onChange={(e) => setKbId(e.target.value)}>
               <option value="">— не привязывать —</option>
               {knowledgeBases.data?.map((kb) => (
                 <option key={kb.id} value={kb.id}>
                   {kb.name}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
-          <label className="flex items-end gap-2 pb-2 text-sm text-slate-400">
-            <input
-              type="checkbox"
+          <Checkbox className="self-end pb-2"
               checked={grounding}
-              onChange={(e) => setGrounding(e.target.checked)}
-              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
-            />
+              onChange={(e) => setGrounding(e.target.checked)}>
             Отвечать только по базе знаний
-          </label>
-          <label className="flex items-end gap-2 pb-2 text-sm text-slate-400">
-            <input
-              type="checkbox"
+          </Checkbox>
+          <Checkbox className="self-end pb-2"
               checked={handoff}
-              onChange={(e) => setHandoff(e.target.checked)}
-              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
-            />
+              onChange={(e) => setHandoff(e.target.checked)}>
             Передавать оператору на чувствительных темах
-          </label>
-          <label className="flex items-end gap-2 pb-2 text-sm text-slate-400">
-            <input
-              type="checkbox"
+          </Checkbox>
+          <Checkbox className="self-end pb-2"
               checked={replyInDm}
-              onChange={(e) => setReplyInDm(e.target.checked)}
-              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
-            />
+              onChange={(e) => setReplyInDm(e.target.checked)}>
             В группе — короткий ответ, полный ИИ-ответ в личку
-          </label>
-          <label className="flex items-end gap-2 pb-2 text-sm text-slate-400">
-            <input
-              type="checkbox"
+          </Checkbox>
+          <Checkbox className="self-end pb-2"
               checked={oneShot}
-              onChange={(e) => setOneShot(e.target.checked)}
-              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
-            />
+              onChange={(e) => setOneShot(e.target.checked)}>
             Один заход: ответить собеседнику один раз и больше не писать
-          </label>
+          </Checkbox>
           {replyInDm && (
             <Field label="Фраза в группу" hint="Что видят в чате; полный ответ уйдёт в личку">
-              <input
-                className={inputClass}
+              <Input
                 value={groupAck}
                 onChange={(e) => setGroupAck(e.target.value)}
               />
@@ -266,8 +239,7 @@ export function ScenariosView() {
           <div className="lg:col-span-2">
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Задержка перед ответом, сек — от">
-                <input
-                  className={inputClass}
+                <Input
                   inputMode="numeric"
                   value={delayMin}
                   onChange={(e) => setDelayMin(e.target.value.replace(/\D/g, ''))}
@@ -275,8 +247,7 @@ export function ScenariosView() {
                 />
               </Field>
               <Field label="до">
-                <input
-                  className={inputClass}
+                <Input
                   inputMode="numeric"
                   value={delayMax}
                   onChange={(e) => setDelayMax(e.target.value.replace(/\D/g, ''))}
@@ -293,30 +264,25 @@ export function ScenariosView() {
               label="Критерий лида (для анализатора)"
               hint="Что считать настоящим запросом, а что нет. Пусто — берётся системный промпт"
             >
-              <textarea
-                className={`${inputClass} h-20 resize-y`}
+              <Textarea
+                rows={3}
                 value={leadCriteria}
                 onChange={(e) => setLeadCriteria(e.target.value)}
                 placeholder="Настоящий лид: человек сам ищет услугу для себя. НЕ лид: шутки, за другого, уже есть…"
               />
             </Field>
           </div>
-          <label className="flex items-end gap-2 pb-2 text-sm text-slate-400">
-            <input
-              type="checkbox"
+          <Checkbox className="self-end pb-2"
               checked={reviewUncertain}
-              onChange={(e) => setReviewUncertain(e.target.checked)}
-              className="h-4 w-4 rounded border-ink-600 bg-ink-950"
-            />
+              onChange={(e) => setReviewUncertain(e.target.checked)}>
             Сомнительные — на подтверждение (кнопки в лог-чате)
-          </label>
+          </Checkbox>
           {reviewUncertain && (
             <Field
               label="Порог сомнения"
               hint="Уверенность от этого значения до порога правила уходит на подтверждение"
             >
-              <input
-                className={inputClass}
+              <Input
                 value={reviewMin}
                 onChange={(e) => setReviewMin(e.target.value.replace(/[^0-9.]/g, ''))}
                 placeholder="0.4"

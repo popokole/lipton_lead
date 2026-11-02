@@ -3,7 +3,7 @@
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
-import { Button, ErrorText, Field, inputClass } from '@/components/ui';
+import { Button, ErrorText, Field, Heading, Input } from '@/components/ui';
 import { login } from '@/lib/api';
 
 export default function LoginPage() {
@@ -31,16 +31,15 @@ export default function LoginPage() {
     <div className="flex min-h-screen items-center justify-center px-4">
       <form
         onSubmit={submit}
-        className="w-full max-w-sm space-y-4 rounded-2xl border border-ink-700 bg-ink-900 p-7"
+        className="w-full max-w-sm space-y-4 rounded-xl border border-ink-700 bg-ink-900 p-6"
       >
         <div>
-          <h1 className="text-lg font-semibold text-slate-100">Вход в панель</h1>
+          <Heading level={1}>Вход в панель</Heading>
           <p className="mt-1 text-sm text-slate-500">Логин и пароль администратора</p>
         </div>
 
         <Field label="Логин">
-          <input
-            className={inputClass}
+          <Input
             type="text"
             autoComplete="username"
             value={email}
@@ -50,8 +49,7 @@ export default function LoginPage() {
         </Field>
 
         <Field label="Пароль">
-          <input
-            className={inputClass}
+          <Input
             type="password"
             autoComplete="current-password"
             value={password}

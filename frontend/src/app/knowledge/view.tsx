@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 
-import { Badge, Button, Card, Empty, ErrorText, Field, PageHeader, Table, inputClass } from '@/components/ui';
+import { Badge, Button, Card, Empty, ErrorText, Field, Input, PageHeader, Quote, RowButton, Table, Textarea } from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 import { useApi } from '@/lib/hooks';
 
@@ -123,8 +123,7 @@ export function KnowledgeView() {
       <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
         <Card title="Базы">
           <div className="mb-3 flex gap-2">
-            <input
-              className={inputClass}
+            <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Название базы"
@@ -139,17 +138,16 @@ export function KnowledgeView() {
             <ul className="space-y-1">
               {bases.data?.map((kb) => (
                 <li key={kb.id}>
-                  <button
+                  <RowButton
+                    selected={selected === kb.id}
                     onClick={() => setSelected(kb.id)}
-                    className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition ${
-                      selected === kb.id ? 'bg-accent-soft text-slate-100' : 'text-slate-400 hover:bg-ink-800'
-                    }`}
+                    className="justify-between rounded-lg px-3 py-2 text-sm"
                   >
                     <span className="truncate">{kb.name}</span>
                     <span className="ml-2 shrink-0 text-xs text-slate-500">
                       {kb.documents} док · {kb.chunks} фрагм.
                     </span>
-                  </button>
+                  </RowButton>
                 </li>
               ))}
             </ul>
@@ -170,12 +168,12 @@ export function KnowledgeView() {
               >
                 <div className="mb-2 text-xs text-slate-500">id: {selected}</div>
                 <Field label="Заголовок">
-                  <input className={inputClass} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Тарифы / FAQ / О психологе" />
+                  <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Тарифы / FAQ / О психологе" />
                 </Field>
                 <div className="mt-3">
                   <Field label="Текст" hint="Вставьте материал — он порежется на фрагменты и проиндексируется">
-                    <textarea
-                      className={`${inputClass} h-40 resize-y`}
+                    <Textarea
+                      rows={8}
                       value={body}
                       onChange={(e) => setBody(e.target.value)}
                       placeholder="Цена терапии 3500, первая консультация 4000. Принимает онлайн и очно в Москве…"
@@ -191,7 +189,7 @@ export function KnowledgeView() {
 
               <Card title="Проверить поиск">
                 <div className="flex gap-2">
-                  <input className={inputClass} value={testQ} onChange={(e) => setTestQ(e.target.value)} placeholder="сколько стоит терапия?" />
+                  <Input value={testQ} onChange={(e) => setTestQ(e.target.value)} placeholder="сколько стоит терапия?" />
                   <Button variant="ghost" onClick={test} disabled={!testQ.trim()}>
                     Найти
                   </Button>
@@ -202,9 +200,7 @@ export function KnowledgeView() {
                       <Empty>Ничего не нашлось — добавьте материал по теме</Empty>
                     ) : (
                       testRes.map((r, i) => (
-                        <div key={i} className="rounded-lg border border-ink-800 bg-ink-900/40 px-3 py-2 text-xs text-slate-300">
-                          {r}
-                        </div>
+                        <Quote key={i}>{r}</Quote>
                       ))
                     )}
                   </div>

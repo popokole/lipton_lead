@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 
-import { Badge, Button, Card, Empty, ErrorText, Field, PageHeader, Table, inputClass } from '@/components/ui';
+import { Badge, Button, Card, Empty, ErrorText, Field, formatPercent, PageHeader, Select, Table, Textarea, ToggleChip } from '@/components/ui';
 import { ApiError, api } from '@/lib/api';
 import { useApi } from '@/lib/hooks';
 import type { Scenario } from '@/lib/types';
@@ -94,8 +94,8 @@ export function AbTestView() {
 
       <Card className="mb-6">
         <Field label="Сценарий">
-          <select
-            className={`${inputClass} max-w-md`}
+          <Select
+            className="max-w-md"
             value={scenarioId}
             onChange={(e) => setScenarioId(e.target.value)}
           >
@@ -104,7 +104,7 @@ export function AbTestView() {
                 {s.name}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
         <p className="mt-3 text-xs text-slate-500">
           Пока есть включённые варианты — первый ответ новому собеседнику берётся из них (по очереди),
@@ -115,8 +115,8 @@ export function AbTestView() {
       <Card title="Добавить заход" className="mb-6">
         <div className="flex items-end gap-3">
           <Field label="Текст первого сообщения">
-            <textarea
-              className={`${inputClass} h-20 w-full resize-y`}
+            <Textarea
+              rows={3}
               value={text}
               onChange={(e) => setText(e.target.value)}
               placeholder="привет) сама недавно искала, могу поделиться контактом…"
@@ -143,14 +143,14 @@ export function AbTestView() {
                 <td className="py-3 pr-4 text-slate-400">{v.reply_count}</td>
                 <td className="py-3 pr-4">
                   <span className={best && best.id === v.id ? 'font-semibold text-emerald-300' : 'text-slate-200'}>
-                    {(v.reply_rate * 100).toFixed(0)}%
+                    {formatPercent(v.reply_rate)}
                   </span>
                   {best && best.id === v.id && <span className="ml-1 text-xs text-emerald-400">лучший</span>}
                 </td>
                 <td className="py-3 pr-4">
-                  <button onClick={() => toggle(v)}>
-                    {v.enabled ? <Badge tone="ok">вкл</Badge> : <Badge>выкл</Badge>}
-                  </button>
+                  <ToggleChip on={v.enabled} tone="ok" onClick={() => toggle(v)}>
+                    {v.enabled ? 'Вкл' : 'Выкл'}
+                  </ToggleChip>
                 </td>
                 <td className="py-3">
                   <Button variant="danger" onClick={() => remove(v)}>
